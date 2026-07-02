@@ -66,7 +66,9 @@ export const env = {
    * frontend can load images from the same host it calls the API on.
    */
   publicBaseUrl: (
-    process.env.PUBLIC_BASE_URL ?? `http://localhost:${num(process.env.PORT, 4000)}`
+    process.env.PUBLIC_BASE_URL ??
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined) ??
+    `http://localhost:${num(process.env.PORT, 4000)}`
   ).replace(/\/$/, ""),
 
   /** How artwork images reach the frontend: "proxy" (default) or "direct". */
