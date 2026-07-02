@@ -35,3 +35,18 @@ export function createApp(catalog: CatalogService = new CatalogService(env)): Ex
 
   return app;
 }
+
+/**
+ * Vercel zero-config Express entry — the default export below is what the
+ * platform detects and deploys as a single function. Warming the catalog
+ * here (rather than in a listener) means the first real request is fast.
+ */
+const catalog = new CatalogService(env);
+const app = createApp(catalog);
+catalog.warm().catch(() => {});
+
+export const config = {
+  maxDuration: 30,
+};
+
+export default app;

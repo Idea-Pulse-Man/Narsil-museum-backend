@@ -1,10 +1,10 @@
 /**
  * Local development / `npm start` bootstrap.
- * Vercel uses `src/server.ts` instead (zero-config Express entry).
+ * Vercel uses `src/app.ts`'s default export instead (zero-config Express entry).
  */
 import { fileURLToPath } from "node:url";
 import { env } from "./config/env.js";
-import app from "./server.js";
+import app from "./app.js";
 
 async function start(): Promise<void> {
   const server = app.listen(env.port, () => {
