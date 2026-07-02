@@ -1,18 +1,10 @@
 /**
- * Application entry point.
- *
- * - Vercel: imports this module and uses the default-exported Express app.
- * - Local dev / `npm start`: runs the bootstrap block at the bottom.
+ * Local development / `npm start` bootstrap.
+ * Vercel uses `src/server.ts` instead (zero-config Express entry).
  */
 import { fileURLToPath } from "node:url";
 import { env } from "./config/env.js";
-import { CatalogService } from "./museum/catalog.js";
-import { createApp } from "./app.js";
-
-const catalog = new CatalogService(env);
-const app = createApp(catalog);
-
-export default app;
+import app from "./server.js";
 
 async function start(): Promise<void> {
   const server = app.listen(env.port, () => {
@@ -23,19 +15,6 @@ async function start(): Promise<void> {
     );
   });
 
-  catalog
-    .warm()
-    .then(({ artworks, artists }) =>
-      console.log(`  catalog: warmed ${artworks} artworks, ${artists} artists`),
-    )
-    .catch((err) =>
-      console.warn(
-        `  catalog: warm failed (will retry on first request): ${
-          err instanceof Error ? err.message : err
-        }`,
-      ),
-    );
-
   const shutdown = (signal: string) => {
     console.log(`\n${signal} received — shutting down.`);
     server.close(() => process.exit(0));
@@ -44,10 +23,11 @@ async function start(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-// Warm the catalog in the background on cold starts (Vercel + local).
-catalog.warm().catch(() => {});
+const isDirectRun =
+  !process.env.VERCEL &&
+  process.argv[1] === fileURLToPath(import.meta.url);
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isDirectRun) {
   start().catch((err) => {
     console.error("Fatal startup error:", err);
     process.exit(1);
