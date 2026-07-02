@@ -1,22 +1,28 @@
 /**
- * Server bootstrap. Creates the app, warms the catalog cache from the museum
- * Public API, and starts listening.
+ * Application entry point.
+ *
+ * - Vercel: imports this module and uses the default-exported Express app.
+ * - Local dev / `npm start`: runs the bootstrap block at the bottom.
  */
+import { fileURLToPath } from "node:url";
 import { env } from "./config/env.js";
 import { CatalogService } from "./museum/catalog.js";
 import { createApp } from "./app.js";
 
-async function main(): Promise<void> {
-  const catalog = new CatalogService(env);
-  const app = createApp(catalog);
+const catalog = new CatalogService(env);
+const app = createApp(catalog);
 
+export default app;
+
+async function start(): Promise<void> {
   const server = app.listen(env.port, () => {
     console.log(`narsil-museum-backend listening on http://localhost:${env.port}`);
     console.log(`  source : ${env.museum.source} → ${env.museum.apiBaseUrl}`);
-    console.log(`  images : IIIF Image API 3.0 → ${env.iiif.baseUrl} (delivery=${env.imageDelivery})`);
+    console.log(
+      `  images : IIIF Image API 3.0 → ${env.iiif.baseUrl} (delivery=${env.imageDelivery})`,
+    );
   });
 
-  // Warm the cache in the background so the first client request is instant.
   catalog
     .warm()
     .then(({ artworks, artists }) =>
@@ -38,7 +44,12 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-main().catch((err) => {
-  console.error("Fatal startup error:", err);
-  process.exit(1);
-});
+// Warm the catalog in the background on cold starts (Vercel + local).
+catalog.warm().catch(() => {});
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  start().catch((err) => {
+    console.error("Fatal startup error:", err);
+    process.exit(1);
+  });
+}
