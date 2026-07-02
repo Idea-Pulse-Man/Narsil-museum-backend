@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/index.js",
   "engines": {
-    "node": ">=18.18"
+    "node": "20.x"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
