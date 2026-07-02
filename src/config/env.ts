@@ -23,6 +23,7 @@ function list(value: string | undefined, fallback: string[]): string[] {
 const corsOrigins = list(process.env.CORS_ORIGIN, [
   "http://localhost:5173",
   "http://localhost:3000",
+  "https://narsil-app-frontend.vercel.app",
 ]);
 
 const imageDelivery =
