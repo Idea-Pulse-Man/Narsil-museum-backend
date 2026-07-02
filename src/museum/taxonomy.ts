@@ -66,7 +66,9 @@ export function inferCategory(signals: TaxonomySignals): CategoryId {
     return "modern-art";
 
   // Paintings catch the largest remaining bucket.
-  if (/paint|oil|tempera|canvas|fresco|watercolor|gouache|acrylic/.test(h))
+  if (
+    /paint|oil|tempera|canvas|fresco|watercolo|gouache|acrylic|portrait/.test(h)
+  )
     return "paintings";
 
   return "paintings";

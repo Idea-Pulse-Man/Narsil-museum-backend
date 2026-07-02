@@ -16,6 +16,7 @@
  */
 import type { Artwork, Artist } from "../types/domain.js";
 import type { ImageResolver } from "./imaging.js";
+import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
 import { fetchJson, chunk } from "../utils/http.js";
 import {
@@ -118,12 +119,7 @@ const PAGE_SIZE = 100;
 const MAX_PAGES = 12;
 const DEFAULT_ACCENT = "#22242b";
 
-export interface CatalogData {
-  artworks: Artwork[];
-  artists: Artist[];
-}
-
-export class ArticSource {
+export class ArticSource implements MuseumSource {
   constructor(
     private readonly apiBaseUrl: string,
     private readonly images: ImageResolver,

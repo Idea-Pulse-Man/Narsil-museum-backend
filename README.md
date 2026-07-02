@@ -1,11 +1,22 @@
 # narsil-museum-backend
 
 REST API backend for the **Narsil** museum app (`museum-app`). It sources
-real, public-domain artworks and their artists from a museum **Public API**
-(the [Art Institute of Chicago](https://api.artic.edu/docs/)), builds each
-artwork's image URL via the **IIIF Image API 3.0**, extracts the title,
-description/content, medium, dating and artist information, and serves it all
-in the exact shape the frontend already consumes.
+real, public-domain artworks and their artists from a museum **Public API**,
+builds each artwork's image URL via the **IIIF Image API 3.0**, extracts the
+title, description/content, medium, dating and artist information, and serves it
+all in the exact shape the frontend already consumes.
+
+Two museum sources are supported (see [`MUSEUM_SOURCE`](#configuration)):
+
+- **`wellcome`** (default) — [Wellcome Collection](https://developers.wellcomecollection.org/).
+  Its IIIF Image API 3.0 server (`iiif.wellcomecollection.org`) serves requests
+  to the backend, so images are fetched server-side and **streamed** to the app
+  from this origin — they always display, regardless of the browser's own
+  network access to the museum.
+- **`artic`** — [Art Institute of Chicago](https://api.artic.edu/docs/). Richer
+  fine-art metadata, but its IIIF image server (`www.artic.edu`) blocks
+  non-browser clients, so images can only be delivered by redirect and may be
+  unreachable on some networks.
 
 Built with Node.js, Express, and TypeScript.
 
@@ -20,11 +31,11 @@ Built with Node.js, Express, and TypeScript.
   app via `GET /api/image/:identifier` (see [Image delivery](#image-delivery)),
   so images load from the app's own origin and never hit cross-origin, hotlink,
   or image-server bot-blocking issues.
-- **Description, content, title & artist info from the museum API** —
-  `src/museum/artic.ts` pulls those fields from the Public API and maps them
-  onto the frontend's `Artwork` / `Artist` types. When the museum record has no
-  written description, a clean placard is synthesised from the artist,
-  medium, date and origin so the feed always has content.
+- **Description, content, title & artist info from the museum API** — the source
+  modules (`src/museum/wellcome.ts`, `src/museum/artic.ts`) pull those fields
+  from the Public API and map them onto the frontend's `Artwork` / `Artist`
+  types. When a record has no written description, a clean placard is synthesised
+  from the medium, date, place and subjects so the feed always has content.
 - **Displayed in the frontend** — the endpoints return the `{ data, total }`
   envelope that `museum-app/src/lib/api.ts` → `fetchRemoteCatalog()` already
   expects, and `artwork.artistId` matches `artist.id`, so the app's feed,
@@ -144,9 +155,10 @@ All configuration is via environment variables (see `.env.example`):
 | `CORS_ORIGIN` | `http://localhost:5173,http://localhost:3000` | Allowed origins (`*` = any) |
 | `PUBLIC_BASE_URL` | `http://localhost:4000` | This backend's public origin (for proxied image URLs) |
 | `IMAGE_DELIVERY` | `proxy` | `proxy` (stream via backend) or `direct` (raw IIIF URL) |
-| `MUSEUM_API_BASE_URL` | `https://api.artic.edu/api/v1` | Museum Public API base |
-| `IIIF_BASE_URL` | `https://www.artic.edu/iiif/2` | IIIF Image API server base; blank ⇒ auto-discover |
-| `IIIF_IMAGE_WIDTH` | `843` | Requested image width (IIIF size `"{width},"`) |
+| `MUSEUM_SOURCE` | `wellcome` | `wellcome` or `artic` |
+| `MUSEUM_API_BASE_URL` | per-source default | Museum Public API base (unset ⇒ source default) |
+| `IIIF_BASE_URL` | per-source default | IIIF Image API server base (unset ⇒ source default) |
+| `IIIF_IMAGE_WIDTH` | `800` | Requested image width (IIIF size `"{width},"`) |
 | `CATALOG_LIMIT` | `80` | How many public-domain artworks to ingest |
 | `CATALOG_CACHE_TTL_MS` | `3600000` | In-memory catalog cache lifetime |
 
@@ -161,11 +173,13 @@ src/
 ├── middleware/             # 404 + error handler
 ├── routes/                 # health, artworks, artists, image proxy, refresh
 ├── museum/
+│   ├── source.ts           # MuseumSource interface + CatalogData
 │   ├── iiif.ts             # IIIF Image API 3.0 URL builder
 │   ├── imaging.ts          # Image delivery strategy (proxy vs direct)
+│   ├── wellcome.ts         # Wellcome Collection client + domain mapping (default)
 │   ├── artic.ts            # Art Institute of Chicago client + domain mapping
 │   ├── taxonomy.ts         # Museum metadata → Discover category / empire
-│   └── catalog.ts          # Aggregates + caches the read model
+│   └── catalog.ts          # Selects source, aggregates + caches the read model
 └── utils/                  # http (fetch + timeout), cache (TTL), text helpers
 ```
 

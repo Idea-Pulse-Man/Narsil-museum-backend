@@ -28,6 +28,32 @@ const corsOrigins = list(process.env.CORS_ORIGIN, [
 const imageDelivery =
   process.env.IMAGE_DELIVERY === "direct" ? "direct" : "proxy";
 
+/**
+ * Which museum Public API to source from.
+ *  - "wellcome" (default): Wellcome Collection. Serves genuine IIIF Image API
+ *    3.0 images that the backend can fetch and stream, so images always display
+ *    regardless of the browser's network.
+ *  - "artic": Art Institute of Chicago. Richer fine-art metadata, but its IIIF
+ *    image server (www.artic.edu) blocks non-browser clients, so images can
+ *    only be delivered via redirect and may be unreachable on some networks.
+ */
+const museumSource =
+  process.env.MUSEUM_SOURCE === "artic" ? "artic" : "wellcome";
+
+/** Source-specific defaults for the API + IIIF endpoints (env can override). */
+const SOURCE_DEFAULTS = {
+  wellcome: {
+    api: "https://api.wellcomecollection.org/catalogue/v2",
+    iiif: "https://iiif.wellcomecollection.org/image",
+  },
+  artic: {
+    api: "https://api.artic.edu/api/v1",
+    iiif: "https://www.artic.edu/iiif/2",
+  },
+} as const;
+
+const sourceDefaults = SOURCE_DEFAULTS[museumSource];
+
 export const env = {
   port: num(process.env.PORT, 4000),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -47,9 +73,11 @@ export const env = {
   imageDelivery: imageDelivery as "proxy" | "direct",
 
   museum: {
-    /** Base URL of the museum Public API (Art Institute of Chicago). */
+    /** Which upstream museum source to use ("wellcome" | "artic"). */
+    source: museumSource as "wellcome" | "artic",
+    /** Base URL of the museum Public API. */
     apiBaseUrl: (
-      process.env.MUSEUM_API_BASE_URL ?? "https://api.artic.edu/api/v1"
+      process.env.MUSEUM_API_BASE_URL ?? sourceDefaults.api
     ).replace(/\/$/, ""),
     /** How many public-domain artworks to ingest. */
     catalogLimit: num(process.env.CATALOG_LIMIT, 80),
@@ -60,14 +88,14 @@ export const env = {
   iiif: {
     /**
      * Base URL of the IIIF Image API 3.0 server. Empty string means
-     * "auto-discover from the museum API config.iiif_url".
+     * "auto-discover from the museum API config.iiif_url" (Artic only).
      */
-    baseUrl: (process.env.IIIF_BASE_URL ?? "https://www.artic.edu/iiif/2").replace(
+    baseUrl: (process.env.IIIF_BASE_URL ?? sourceDefaults.iiif).replace(
       /\/$/,
       "",
     ),
     /** Requested image width; maps to the IIIF size parameter "{width},". */
-    imageWidth: num(process.env.IIIF_IMAGE_WIDTH, 843),
+    imageWidth: num(process.env.IIIF_IMAGE_WIDTH, 800),
   },
 } as const;
 

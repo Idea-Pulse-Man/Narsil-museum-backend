@@ -25,7 +25,10 @@ export function createApp(catalog: CatalogService = new CatalogService(env)): Ex
     res.json({
       name: "narsil-museum-backend",
       version: "1.0.0",
-      source: "Art Institute of Chicago Public API",
+      source:
+        env.museum.source === "artic"
+          ? "Art Institute of Chicago Public API"
+          : "Wellcome Collection Public API",
       images: `IIIF Image API 3.0 (${env.iiif.baseUrl}) · delivery=${env.imageDelivery}`,
       endpoints: [
         "GET /api/health",

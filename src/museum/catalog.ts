@@ -7,7 +7,9 @@
  */
 import type { Artwork, Artist } from "../types/domain.js";
 import type { Env } from "../config/env.js";
-import { ArticSource, type CatalogData } from "./artic.js";
+import type { CatalogData, MuseumSource } from "./source.js";
+import { ArticSource } from "./artic.js";
+import { WellcomeSource } from "./wellcome.js";
 import { IiifImageService } from "./iiif.js";
 import { ImageResolver } from "./imaging.js";
 import { TtlCache } from "../utils/cache.js";
@@ -38,11 +40,10 @@ export class CatalogService {
       env.publicBaseUrl,
     );
 
-    const source = new ArticSource(
-      env.museum.apiBaseUrl,
-      this.images,
-      env.museum.catalogLimit,
-    );
+    const source: MuseumSource =
+      env.museum.source === "artic"
+        ? new ArticSource(env.museum.apiBaseUrl, this.images, env.museum.catalogLimit)
+        : new WellcomeSource(env.museum.apiBaseUrl, this.images, env.museum.catalogLimit);
 
     this.cache = new TtlCache<IndexedCatalog>(env.museum.cacheTtlMs, async () => {
       const data = await source.fetchCatalog();
