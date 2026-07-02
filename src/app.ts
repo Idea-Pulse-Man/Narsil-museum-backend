@@ -1,3 +1,5 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express, { type Express } from "express";
 import cors from "cors";
 import { env } from "./config/env.js";
@@ -21,26 +23,10 @@ export function createApp(catalog: CatalogService = new CatalogService(env)): Ex
   );
   app.use(express.json());
 
-  app.get("/", (_req, res) => {
-    res.json({
-      name: "narsil-museum-backend",
-      version: "1.0.0",
-      source:
-        env.museum.source === "artic"
-          ? "Art Institute of Chicago Public API"
-          : "Wellcome Collection Public API",
-      images: `IIIF Image API 3.0 (${env.iiif.baseUrl}) · delivery=${env.imageDelivery}`,
-      endpoints: [
-        "GET /api/health",
-        "GET /api/artworks",
-        "GET /api/artworks/:id",
-        "GET /api/artists",
-        "GET /api/artists/:id",
-        "GET /api/image/:identifier",
-        "POST /api/refresh",
-      ],
-    });
-  });
+  // Local dev: serve public/index.html from project root.
+  // On Vercel, files in public/ are served from the CDN (express.static is ignored).
+  const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../public");
+  app.use(express.static(publicDir));
 
   app.use("/api", apiRoutes(catalog));
 
