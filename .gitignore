@@ -5,3 +5,6 @@ dist/
 *.log
 npm-debug.log*
 .DS_Store
+
+# Ingestion resume cursor (per-machine state)
+.ingest-state.json

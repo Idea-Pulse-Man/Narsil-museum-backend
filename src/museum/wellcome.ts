@@ -97,11 +97,22 @@ const PAGE_SIZE = 100;
 const MAX_PAGE_CAP = 200;
 
 export class WellcomeSource implements MuseumSource {
+  /**
+   * Page the NEXT run should start from. Advances past the pages this run read
+   * (wrapping at the end of the collection) so daily runs pull fresh works
+   * rather than re-fetching the same slice. Read by the ingestion job.
+   */
+  nextStartPage: number;
+
   constructor(
     private readonly apiBaseUrl: string,
     private readonly images: ImageResolver,
     private readonly limit: number,
-  ) {}
+    /** Page to begin paging from (1-based). Defaults to 1. */
+    private readonly startPage = 1,
+  ) {
+    this.nextStartPage = Math.max(1, startPage);
+  }
 
   async fetchCatalog(): Promise<CatalogData> {
     const works = await this.collectWorks();
@@ -132,7 +143,12 @@ export class WellcomeSource implements MuseumSource {
       Math.max(1, Math.ceil(this.limit / PAGE_SIZE) + 4),
     );
 
-    for (let page = 1; page <= maxPages; page++) {
+    let page = Math.max(1, this.startPage);
+    let totalPages = Number.POSITIVE_INFINITY;
+    let lastPage = page - 1; // last page actually read (for the resume cursor)
+    let read = 0;
+
+    while (read < maxPages) {
       const url =
         `${this.apiBaseUrl}/works` +
         `?pageSize=${PAGE_SIZE}&page=${page}` +
@@ -141,8 +157,16 @@ export class WellcomeSource implements MuseumSource {
         `&include=${encodeURIComponent(INCLUDES)}`;
 
       const res = await fetchJson<WcResultList<WcWork>>(url);
+      if (res.totalPages) totalPages = res.totalPages;
       const results = res.results ?? [];
-      if (results.length === 0) break;
+
+      // Empty page → we've run off the end. Wrap to the start once; if page 1
+      // itself is empty, there's nothing to fetch.
+      if (results.length === 0) {
+        if (page === 1) break;
+        page = 1;
+        continue;
+      }
 
       for (const work of results) {
         if (!this.identifierOf(work)) continue;
@@ -151,12 +175,19 @@ export class WellcomeSource implements MuseumSource {
         else anonymous.push(work);
       }
 
+      lastPage = page;
+      read++;
+
       // Stop once we have enough candidates across all tiers.
       if (person.length + named.length + anonymous.length >= this.limit) break;
 
-      const totalPages = res.totalPages ?? page;
-      if (page >= totalPages) break;
+      // Advance, wrapping back to the first page at the end of the collection.
+      page = page + 1 > totalPages ? 1 : page + 1;
     }
+
+    // Where the next run should resume (one past the last page we read, wrapped).
+    this.nextStartPage =
+      lastPage + 1 > totalPages || lastPage < 1 ? 1 : lastPage + 1;
 
     const out: WcWork[] = [];
     for (const tier of [person, named, anonymous]) {

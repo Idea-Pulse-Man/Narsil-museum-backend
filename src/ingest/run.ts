@@ -13,6 +13,8 @@
  * Run on EC2:    npm run build && npm run ingest:prod   (via cron)
  */
 import "dotenv/config";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { env } from "../config/env.js";
 import { IiifImageService } from "../museum/iiif.js";
 import { ImageResolver } from "../museum/imaging.js";
@@ -32,6 +34,35 @@ function artworkKey(id: string): string {
 /** S3 object key for an artist portrait, e.g. "artworks/artists/wc-x.jpg". */
 function artistKey(id: string): string {
   return `${env.aws.s3ArtistPrefix}/${id}.jpg`;
+}
+
+// ── Resume cursor ───────────────────────────────────────────────────────────
+// Persisted next-page marker so each run pulls a DIFFERENT slice of the museum
+// collection (the catalog grows instead of re-fetching the same works). Stored
+// next to the repo; safe to delete (a reset just re-covers from page 1, and
+// existing images/rows are skipped/upserted, never duplicated).
+const STATE_PATH = join(process.cwd(), ".ingest-state.json");
+
+interface IngestState {
+  wellcomeNextPage?: number;
+}
+
+function readState(): IngestState {
+  try {
+    return JSON.parse(readFileSync(STATE_PATH, "utf8")) as IngestState;
+  } catch {
+    return {};
+  }
+}
+
+function writeState(state: IngestState): void {
+  try {
+    writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.warn(
+      `  (could not persist ingest cursor: ${err instanceof Error ? err.message : err})`,
+    );
+  }
 }
 
 const BROWSER_HEADERS: Record<string, string> = {
@@ -65,7 +96,7 @@ class RetryableError extends Error {
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-function buildSource(): MuseumSource {
+function buildSource(startPage: number): MuseumSource {
   // Direct delivery → `artwork.image` is the raw upstream IIIF URL we download.
   const iiif = new IiifImageService(
     env.iiif.baseUrl,
@@ -75,7 +106,12 @@ function buildSource(): MuseumSource {
   const images = new ImageResolver(iiif, "direct", env.publicBaseUrl);
   return env.museum.source === "artic"
     ? new ArticSource(env.museum.apiBaseUrl, images, env.museum.catalogLimit)
-    : new WellcomeSource(env.museum.apiBaseUrl, images, env.museum.catalogLimit);
+    : new WellcomeSource(
+        env.museum.apiBaseUrl,
+        images,
+        env.museum.catalogLimit,
+        startPage,
+      );
 }
 
 function assertConfig(): void {
@@ -270,12 +306,16 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
   assertConfig();
 
+  const state = readState();
+  const startPage = Math.max(1, Number(state.wellcomeNextPage) || 1);
+
   console.log(
     `Ingest: source=${env.museum.source} limit=${env.museum.catalogLimit} ` +
-      `width=${env.ingest.imageWidth} → s3://${env.aws.s3Bucket}/${env.aws.s3Prefix}`,
+      `startPage=${startPage} width=${env.ingest.imageWidth} → ` +
+      `s3://${env.aws.s3Bucket}/${env.aws.s3Prefix}`,
   );
 
-  const source = buildSource();
+  const source = buildSource(startPage);
   const s3 = new S3ImageStore();
   const store = new SupabaseCatalogStore();
 
@@ -306,6 +346,13 @@ async function main(): Promise<void> {
   console.log("4/4 Upserting into Supabase…");
   await store.upsertArtists(finalArtists);
   await store.upsertArtworks(ready);
+
+  // Advance the cursor only after a successful upsert, so a failed run retries
+  // the same slice next time instead of skipping it.
+  if (source instanceof WellcomeSource) {
+    writeState({ ...state, wellcomeNextPage: source.nextStartPage });
+    console.log(`     next run resumes at Wellcome page ${source.nextStartPage}`);
+  }
 
   const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.log(
