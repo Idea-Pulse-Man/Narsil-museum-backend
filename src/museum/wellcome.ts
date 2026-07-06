@@ -93,7 +93,8 @@ const INCLUDES = [
 ].join(",");
 
 const PAGE_SIZE = 100;
-const MAX_PAGES = 12;
+/** Hard cap on pages fetched in one run, so a huge limit can't hammer the API. */
+const MAX_PAGE_CAP = 200;
 
 export class WellcomeSource implements MuseumSource {
   constructor(
@@ -124,11 +125,14 @@ export class WellcomeSource implements MuseumSource {
     const named: WcWork[] = [];
     const anonymous: WcWork[] = [];
 
-    for (
-      let page = 1;
-      page <= MAX_PAGES && person.length < this.limit;
-      page++
-    ) {
+    // Page deep enough to satisfy the requested limit (plus headroom for the
+    // works we filter out), capped so a big limit can't hammer the API.
+    const maxPages = Math.min(
+      MAX_PAGE_CAP,
+      Math.max(1, Math.ceil(this.limit / PAGE_SIZE) + 4),
+    );
+
+    for (let page = 1; page <= maxPages; page++) {
       const url =
         `${this.apiBaseUrl}/works` +
         `?pageSize=${PAGE_SIZE}&page=${page}` +
@@ -146,6 +150,9 @@ export class WellcomeSource implements MuseumSource {
         else if (this.artistNameOf(work)) named.push(work);
         else anonymous.push(work);
       }
+
+      // Stop once we have enough candidates across all tiers.
+      if (person.length + named.length + anonymous.length >= this.limit) break;
 
       const totalPages = res.totalPages ?? page;
       if (page >= totalPages) break;

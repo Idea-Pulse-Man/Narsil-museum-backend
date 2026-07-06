@@ -42,6 +42,29 @@ const BROWSER_HEADERS: Record<string, string> = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
+/**
+ * Wikimedia Commons requires a descriptive User-Agent identifying the bot and a
+ * contact URL, and rate-limits hard (HTTP 429) otherwise. See
+ * https://meta.wikimedia.org/wiki/User-Agent_policy
+ */
+const WIKIMEDIA_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "NarsilMuseumBot/1.0 (https://github.com/Idea-Pulse-Man/Narsil-museum-backend) ingestion",
+  Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+};
+
+class RetryableError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly retryAfterMs: number,
+  ) {
+    super(`retryable ${status}`);
+  }
+}
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 function buildSource(): MuseumSource {
   // Direct delivery → `artwork.image` is the raw upstream IIIF URL we download.
   const iiif = new IiifImageService(
@@ -75,14 +98,26 @@ function assertConfig(): void {
   }
 }
 
-async function download(
+interface DownloadOptions {
+  timeoutMs?: number;
+  headers?: Record<string, string>;
+  /** Number of retries on 429/503/timeout (with exponential backoff). */
+  retries?: number;
+}
+
+async function downloadOnce(
   url: string,
-  timeoutMs = 20_000,
+  headers: Record<string, string>,
+  timeoutMs: number,
 ): Promise<{ buffer: Buffer; contentType: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { headers: BROWSER_HEADERS, signal: controller.signal });
+    const res = await fetch(url, { headers, signal: controller.signal });
+    if (res.status === 429 || res.status === 503) {
+      const retryAfter = Number(res.headers.get("retry-after")) || 0;
+      throw new RetryableError(res.status, retryAfter * 1000);
+    }
     if (!res.ok) throw new Error(`GET ${url} → ${res.status} ${res.statusText}`);
     const buffer = Buffer.from(await res.arrayBuffer());
     if (buffer.length === 0) throw new Error(`GET ${url} → empty body`);
@@ -90,6 +125,31 @@ async function download(
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function download(
+  url: string,
+  opts: DownloadOptions = {},
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const { timeoutMs = 20_000, headers = BROWSER_HEADERS, retries = 2 } = opts;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await downloadOnce(url, headers, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      const isRetryable =
+        err instanceof RetryableError ||
+        (err instanceof Error && err.name === "AbortError");
+      if (attempt >= retries || !isRetryable) throw err;
+      const backoff =
+        err instanceof RetryableError && err.retryAfterMs > 0
+          ? err.retryAfterMs
+          : 800 * 2 ** attempt;
+      await sleep(backoff);
+    }
+  }
+  throw lastErr;
 }
 
 /** Run `fn` over `items` with a fixed concurrency limit. */
@@ -171,9 +231,12 @@ async function stageArtistPhotos(
 ): Promise<{ artists: Artist[]; stats: Stats }> {
   const stats: Stats = { uploaded: 0, skipped: 0, failed: 0 };
 
+  // Wikimedia rate-limits aggressively — keep portrait fetching gentle.
+  const portraitConcurrency = Math.min(2, env.ingest.concurrency);
+
   const staged = await mapLimit(
     artists,
-    env.ingest.concurrency,
+    portraitConcurrency,
     async (artist): Promise<Artist> => {
       const key = artistKey(artist.id);
       try {
@@ -183,7 +246,10 @@ async function stageArtistPhotos(
         }
         const portraitUrl = await getArtistPhotoUrl(artist.name);
         if (!portraitUrl) return artist; // no portrait → monogram
-        const { buffer, contentType } = await download(portraitUrl);
+        const { buffer, contentType } = await download(portraitUrl, {
+          headers: WIKIMEDIA_HEADERS,
+          retries: 4,
+        });
         const url = await s3.upload(key, buffer, contentType);
         stats.uploaded++;
         return { ...artist, avatar: url };
