@@ -13,9 +13,13 @@
     "build": "tsc -p tsconfig.json",
     "vercel-build": "npm run build",
     "start": "node dist/src/index.js",
+    "ingest": "tsx src/ingest/run.ts",
+    "ingest:prod": "node dist/src/ingest/run.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.717.0",
+    "@supabase/supabase-js": "^2.47.10",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2"

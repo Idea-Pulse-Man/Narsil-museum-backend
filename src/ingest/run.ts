@@ -1,0 +1,253 @@
+/**
+ * Daily ingestion job.
+ * ---------------------------------------------------------------------------
+ * 1. Pull a catalog of public-domain artworks + artists from the museum source
+ *    (Wellcome by default — its IIIF images are downloadable server-side;
+ *    Artic's WAF blocks non-browser clients, so it can't be ingested to S3).
+ * 2. For each artwork, download the IIIF image and upload it to S3 (skipping
+ *    images already stored), rewriting `image` to the public S3 URL.
+ * 3. Upsert artists + artworks into Supabase, keyed on their TEXT id, so the
+ *    app can read the whole catalog directly from Supabase.
+ *
+ * Run locally:   npm run ingest
+ * Run on EC2:    npm run build && npm run ingest:prod   (via cron)
+ */
+import "dotenv/config";
+import { env } from "../config/env.js";
+import { IiifImageService } from "../museum/iiif.js";
+import { ImageResolver } from "../museum/imaging.js";
+import { ArticSource } from "../museum/artic.js";
+import { WellcomeSource } from "../museum/wellcome.js";
+import { getArtistPhotoUrl } from "../museum/artistPhoto.js";
+import type { MuseumSource } from "../museum/source.js";
+import type { Artwork, Artist } from "../types/domain.js";
+import { S3ImageStore } from "./s3.js";
+import { SupabaseCatalogStore } from "./store.js";
+
+/** S3 object key for an artwork image, e.g. "artworks/wc-abc.jpg". */
+function artworkKey(id: string): string {
+  return `${env.aws.s3Prefix}/${id}.jpg`;
+}
+
+/** S3 object key for an artist portrait, e.g. "artworks/artists/wc-x.jpg". */
+function artistKey(id: string): string {
+  return `${env.aws.s3ArtistPrefix}/${id}.jpg`;
+}
+
+const BROWSER_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+function buildSource(): MuseumSource {
+  // Direct delivery → `artwork.image` is the raw upstream IIIF URL we download.
+  const iiif = new IiifImageService(
+    env.iiif.baseUrl,
+    env.ingest.imageWidth,
+    Boolean(process.env.IIIF_BASE_URL),
+  );
+  const images = new ImageResolver(iiif, "direct", env.publicBaseUrl);
+  return env.museum.source === "artic"
+    ? new ArticSource(env.museum.apiBaseUrl, images, env.museum.catalogLimit)
+    : new WellcomeSource(env.museum.apiBaseUrl, images, env.museum.catalogLimit);
+}
+
+function assertConfig(): void {
+  const missing: string[] = [];
+  if (!env.aws.s3Bucket) missing.push("S3_BUCKET");
+  if (!env.aws.s3PublicBaseUrl) missing.push("S3_PUBLIC_BASE_URL");
+  if (!env.supabase.url) missing.push("SUPABASE_URL");
+  if (!env.supabase.serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (missing.length) {
+    throw new Error(
+      `Ingestion is missing required env vars: ${missing.join(", ")}. ` +
+        `Set them in the .env file (see .env.example).`,
+    );
+  }
+  if (env.museum.source === "artic") {
+    console.warn(
+      "WARNING: MUSEUM_SOURCE=artic — the Art Institute IIIF server blocks " +
+        "server-side downloads (403), so images will fail. Use 'wellcome'.",
+    );
+  }
+}
+
+async function download(
+  url: string,
+  timeoutMs = 20_000,
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers: BROWSER_HEADERS, signal: controller.signal });
+    if (!res.ok) throw new Error(`GET ${url} → ${res.status} ${res.statusText}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length === 0) throw new Error(`GET ${url} → empty body`);
+    return { buffer, contentType: res.headers.get("content-type") ?? "image/jpeg" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Run `fn` over `items` with a fixed concurrency limit. */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    worker,
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+interface Stats {
+  uploaded: number;
+  skipped: number;
+  failed: number;
+}
+
+/** Ensure every artwork's image is in S3; rewrite `image` to the S3 URL. */
+async function stageImages(artworks: Artwork[], s3: S3ImageStore): Promise<{
+  ready: Artwork[];
+  stats: Stats;
+}> {
+  const stats: Stats = { uploaded: 0, skipped: 0, failed: 0 };
+
+  const staged = await mapLimit(
+    artworks,
+    env.ingest.concurrency,
+    async (art): Promise<Artwork | null> => {
+      const upstream = art.image;
+      if (!upstream) {
+        stats.failed++;
+        return null;
+      }
+      const key = artworkKey(art.id);
+      try {
+        if (env.ingest.skipExisting && (await s3.exists(key))) {
+          stats.skipped++;
+          return { ...art, image: s3.publicUrl(key) };
+        }
+        const { buffer, contentType } = await download(upstream);
+        const url = await s3.upload(key, buffer, contentType);
+        stats.uploaded++;
+        return { ...art, image: url };
+      } catch (err) {
+        stats.failed++;
+        console.warn(
+          `  ✗ ${art.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return null;
+      }
+    },
+  );
+
+  return { ready: staged.filter((a): a is Artwork => a !== null), stats };
+}
+
+/**
+ * Resolve each artist's portrait (Wikidata, server-side) and store it in S3,
+ * setting `artist.avatar` to the public S3 URL. Artists with no resolvable
+ * portrait (anonymous makers, workshops, etc.) are returned unchanged and fall
+ * back to a monogram in the app. Never throws — a failed portrait is non-fatal.
+ */
+async function stageArtistPhotos(
+  artists: Artist[],
+  s3: S3ImageStore,
+): Promise<{ artists: Artist[]; stats: Stats }> {
+  const stats: Stats = { uploaded: 0, skipped: 0, failed: 0 };
+
+  const staged = await mapLimit(
+    artists,
+    env.ingest.concurrency,
+    async (artist): Promise<Artist> => {
+      const key = artistKey(artist.id);
+      try {
+        if (env.ingest.skipExisting && (await s3.exists(key))) {
+          stats.skipped++;
+          return { ...artist, avatar: s3.publicUrl(key) };
+        }
+        const portraitUrl = await getArtistPhotoUrl(artist.name);
+        if (!portraitUrl) return artist; // no portrait → monogram
+        const { buffer, contentType } = await download(portraitUrl);
+        const url = await s3.upload(key, buffer, contentType);
+        stats.uploaded++;
+        return { ...artist, avatar: url };
+      } catch (err) {
+        stats.failed++;
+        console.warn(
+          `  ✗ artist ${artist.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return artist;
+      }
+    },
+  );
+
+  return { artists: staged, stats };
+}
+
+async function main(): Promise<void> {
+  const startedAt = Date.now();
+  assertConfig();
+
+  console.log(
+    `Ingest: source=${env.museum.source} limit=${env.museum.catalogLimit} ` +
+      `width=${env.ingest.imageWidth} → s3://${env.aws.s3Bucket}/${env.aws.s3Prefix}`,
+  );
+
+  const source = buildSource();
+  const s3 = new S3ImageStore();
+  const store = new SupabaseCatalogStore();
+
+  console.log("1/4 Fetching catalog from museum API…");
+  const { artworks, artists } = await source.fetchCatalog();
+  console.log(`     got ${artworks.length} artworks, ${artists.length} artists`);
+
+  console.log("2/4 Uploading artwork images to S3…");
+  const { ready, stats } = await stageImages(artworks, s3);
+  console.log(
+    `     uploaded=${stats.uploaded} skipped=${stats.skipped} failed=${stats.failed}`,
+  );
+
+  let finalArtists = artists;
+  if (env.ingest.artistPhotos) {
+    console.log("3/4 Resolving + uploading artist portraits to S3…");
+    const photos = await stageArtistPhotos(artists, s3);
+    finalArtists = photos.artists;
+    const withPhoto = finalArtists.filter((a) => a.avatar).length;
+    console.log(
+      `     uploaded=${photos.stats.uploaded} skipped=${photos.stats.skipped} ` +
+        `failed=${photos.stats.failed} (with portrait: ${withPhoto}/${finalArtists.length})`,
+    );
+  } else {
+    console.log("3/4 Artist portraits disabled (INGEST_ARTIST_PHOTOS=false).");
+  }
+
+  console.log("4/4 Upserting into Supabase…");
+  await store.upsertArtists(finalArtists);
+  await store.upsertArtworks(ready);
+
+  const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+  console.log(
+    `Done in ${secs}s — ${ready.length} artworks + ${finalArtists.length} artists live.`,
+  );
+}
+
+main().catch((err) => {
+  console.error("Ingestion failed:", err instanceof Error ? err.message : err);
+  process.exit(1);
+});

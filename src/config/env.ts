@@ -100,6 +100,51 @@ export const env = {
     /** Requested image width; maps to the IIIF size parameter "{width},". */
     imageWidth: num(process.env.IIIF_IMAGE_WIDTH, 800),
   },
+
+  /**
+   * Daily ingestion job (`npm run ingest`). Downloads public-domain art,
+   * uploads the images to S3, and upserts artworks + artists into Supabase.
+   * Only the ingestion job reads these — the web API never does.
+   */
+  aws: {
+    region: process.env.AWS_REGION ?? "us-east-2",
+    /** Target S3 bucket for images. */
+    s3Bucket: process.env.S3_BUCKET ?? "",
+    /** Key prefix (folder) for artwork images — must be publicly readable. */
+    s3Prefix: (process.env.S3_PREFIX ?? "artworks").replace(/^\/|\/$/g, ""),
+    /**
+     * Key prefix for artist portrait images. Defaults to a subfolder of the
+     * artwork prefix so it's covered by the same public bucket policy
+     * (`artworks/*`) — no extra AWS change needed.
+     */
+    s3ArtistPrefix: (process.env.S3_ARTIST_PREFIX ?? "artworks/artists").replace(
+      /^\/|\/$/g,
+      "",
+    ),
+    /**
+     * Public base URL objects are served from (no trailing slash). For a
+     * public bucket: https://<bucket>.s3.<region>.amazonaws.com
+     * For CloudFront later: https://<distribution>.cloudfront.net
+     */
+    s3PublicBaseUrl: (process.env.S3_PUBLIC_BASE_URL ?? "").replace(/\/$/, ""),
+  },
+
+  supabase: {
+    url: (process.env.SUPABASE_URL ?? "").replace(/\/$/, ""),
+    /** SERVICE ROLE key (server-side only — bypasses RLS to write the catalog). */
+    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+  },
+
+  ingest: {
+    /** Width (px) of the image uploaded to S3 (IIIF size "{width},"). */
+    imageWidth: num(process.env.INGEST_IMAGE_WIDTH, 843),
+    /** Skip re-downloading images already present in S3. */
+    skipExisting: process.env.INGEST_SKIP_EXISTING !== "false",
+    /** Max concurrent image downloads/uploads. */
+    concurrency: num(process.env.INGEST_CONCURRENCY, 6),
+    /** Resolve artist portraits (Wikidata) and store them in S3. */
+    artistPhotos: process.env.INGEST_ARTIST_PHOTOS !== "false",
+  },
 } as const;
 
 export type Env = typeof env;
