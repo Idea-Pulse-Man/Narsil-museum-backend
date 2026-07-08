@@ -3,7 +3,6 @@ import type { CatalogService } from "../museum/catalog.js";
 import { artworkRoutes } from "./artworks.js";
 import { artistRoutes } from "./artists.js";
 import { artistPhotoRoutes } from "./artistPhoto.js";
-import { assetRoutes } from "./asset.js";
 import { imageRoutes } from "./image.js";
 
 /** Mounts all `/api/*` routes onto a single router. */
@@ -23,7 +22,6 @@ export function apiRoutes(catalog: CatalogService): Router {
   router.use("/artworks", artworkRoutes(catalog));
   router.use("/artists", artistRoutes(catalog));
   router.use("/artist-photo", artistPhotoRoutes());
-  router.use("/asset", assetRoutes());
   router.use("/image", imageRoutes(catalog.iiif));
 
   return router;
