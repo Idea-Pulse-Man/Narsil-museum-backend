@@ -61,6 +61,7 @@ export function inferCategory(signals: TaxonomySignals): CategoryId {
 
   // Movement-driven categories.
   if (/japan|ukiyo|edo|nihon/.test(h)) return "japanese-art";
+  if (/medieval|gothic|middle ages|byzantine|romanesque/.test(h)) return "medieval";
   if (/renaissance|baroque/.test(h)) return "renaissance";
   if (/modern|impression|expression|cubis|surreal|abstract|contemporary|pop art|post-impress/.test(h))
     return "modern-art";

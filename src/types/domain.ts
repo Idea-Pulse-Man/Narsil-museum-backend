@@ -35,6 +35,7 @@ export type CategoryId =
   | "greek"
   | "egyptian"
   | "renaissance"
+  | "medieval"
   | "japanese-art"
   | "modern-art";
 
