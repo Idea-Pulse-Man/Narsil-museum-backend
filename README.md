@@ -85,6 +85,7 @@ testing.
 | GET | `/api/health` | Health check |
 | GET | `/api/artworks` | List artworks → `{ data, total }` |
 | GET | `/api/artworks/:id` | Get one artwork |
+| GET | `/api/artworks/:id/download` | Download artwork image (streams bytes, CORS-safe) |
 | GET | `/api/artists` | List artists → `{ data, total }` |
 | GET | `/api/artists/:id` | Get one artist |
 | GET | `/api/image/:identifier` | Proxy/stream an IIIF 3.0 image (`?w=<px>`, `?full=1`) |
