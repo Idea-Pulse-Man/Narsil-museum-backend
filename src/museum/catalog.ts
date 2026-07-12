@@ -1,15 +1,15 @@
 /**
  * Catalog service — the app's single read model.
  * ---------------------------------------------------------------------------
- * Builds a catalog (artworks + artists) from the configured museum source,
- * caches it with a TTL, and exposes simple lookups the routes need. The source
- * is abstracted behind `ArticSource` so a different museum can be dropped in.
+ * Lists artworks + artists from Supabase (the merged catalog every
+ * `MUSEUM_SOURCES` entry lands in via the ingest job — see `src/ingest/run.ts`),
+ * caching the result with a TTL. Adding a museum is purely an ingestion-side
+ * change; this service never talks to a museum API directly.
  */
 import type { Artwork, Artist } from "../types/domain.js";
+import type { CatalogData } from "./source.js";
 import type { Env } from "../config/env.js";
-import type { CatalogData, MuseumSource } from "./source.js";
-import { ArticSource } from "./artic.js";
-import { WellcomeSource } from "./wellcome.js";
+import { listArtworksFromSupabase, listArtistsFromSupabase } from "./supabaseArtwork.js";
 import { IiifImageService } from "./iiif.js";
 import { ImageResolver } from "./imaging.js";
 import { TtlCache } from "../utils/cache.js";
@@ -40,17 +40,16 @@ export class CatalogService {
       env.publicBaseUrl,
     );
 
-    const source: MuseumSource =
-      env.museum.source === "artic"
-        ? new ArticSource(env.museum.apiBaseUrl, this.images, env.museum.catalogLimit)
-        : new WellcomeSource(env.museum.apiBaseUrl, this.images, env.museum.catalogLimit);
-
     this.cache = new TtlCache<IndexedCatalog>(env.museum.cacheTtlMs, async () => {
-      const data = await source.fetchCatalog();
+      const [artworks, artists] = await Promise.all([
+        listArtworksFromSupabase(),
+        listArtistsFromSupabase(),
+      ]);
       return {
-        ...data,
-        artworkById: new Map(data.artworks.map((a) => [a.id, a])),
-        artistById: new Map(data.artists.map((a) => [a.id, a])),
+        artworks,
+        artists,
+        artworkById: new Map(artworks.map((a) => [a.id, a])),
+        artistById: new Map(artists.map((a) => [a.id, a])),
       };
     });
   }

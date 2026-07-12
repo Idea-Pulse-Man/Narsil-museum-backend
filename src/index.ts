@@ -8,10 +8,7 @@ import app from "./app.js";
 async function start(): Promise<void> {
   const server = app.listen(env.port, () => {
     console.log(`narsil-museum-backend listening on http://localhost:${env.port}`);
-    console.log(`  source : ${env.museum.source} → ${env.museum.apiBaseUrl}`);
-    console.log(
-      `  images : IIIF Image API 3.0 → ${env.iiif.baseUrl} (delivery=${env.imageDelivery})`,
-    );
+    console.log(`  catalog: Supabase (ingested from ${env.museum.sources.join(", ")})`);
   });
 
   const shutdown = (signal: string) => {
