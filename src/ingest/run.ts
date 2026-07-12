@@ -15,11 +15,12 @@
 import "dotenv/config";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { env } from "../config/env.js";
+import { env, SOURCE_DEFAULTS } from "../config/env.js";
 import { IiifImageService } from "../museum/iiif.js";
 import { ImageResolver } from "../museum/imaging.js";
 import { ArticSource } from "../museum/artic.js";
 import { WellcomeSource } from "../museum/wellcome.js";
+import { HarvardSource } from "../museum/harvard.js";
 import { getArtistPhotoUrl } from "../museum/artistPhoto.js";
 import type { MuseumSource } from "../museum/source.js";
 import type { Artwork, Artist } from "../types/domain.js";
@@ -45,6 +46,7 @@ const STATE_PATH = join(process.cwd(), ".ingest-state.json");
 
 interface IngestState {
   wellcomeNextPage?: number;
+  harvardNextPage?: number;
 }
 
 function readState(): IngestState {
@@ -96,22 +98,46 @@ class RetryableError extends Error {
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-function buildSource(startPage: number): MuseumSource {
-  // Direct delivery → `artwork.image` is the raw upstream IIIF URL we download.
-  const iiif = new IiifImageService(
-    env.iiif.baseUrl,
-    env.ingest.imageWidth,
-    Boolean(process.env.IIIF_BASE_URL),
-  );
-  const images = new ImageResolver(iiif, "direct", env.publicBaseUrl);
-  return env.museum.source === "artic"
-    ? new ArticSource(env.museum.apiBaseUrl, images, env.museum.catalogLimit)
-    : new WellcomeSource(
-        env.museum.apiBaseUrl,
+// Direct delivery → `artwork.image` is the raw upstream IIIF URL we download.
+function buildImages(iiifBaseUrl: string, pinned: boolean): ImageResolver {
+  const iiif = new IiifImageService(iiifBaseUrl, env.ingest.imageWidth, pinned);
+  return new ImageResolver(iiif, "direct", env.publicBaseUrl);
+}
+
+/**
+ * Build one `MuseumSource` per entry in `MUSEUM_SOURCES`. The legacy
+ * `MUSEUM_API_BASE_URL` / `IIIF_BASE_URL` overrides only apply to the first
+ * (primary) source — same behaviour as before multi-source support existed —
+ * every other source always uses its own fixed defaults.
+ */
+function buildSources(state: IngestState): MuseumSource[] {
+  return env.museum.sources.map((id): MuseumSource => {
+    const isPrimary = id === env.museum.source;
+
+    if (id === "harvard") {
+      const images = buildImages(SOURCE_DEFAULTS.harvard.iiif, true);
+      const startPage = Math.max(1, Number(state.harvardNextPage) || 1);
+      return new HarvardSource(
+        env.harvard.apiBaseUrl,
+        env.harvard.apiKey,
         images,
-        env.museum.catalogLimit,
+        env.harvard.catalogLimit,
         startPage,
       );
+    }
+
+    const apiBaseUrl = isPrimary ? env.museum.apiBaseUrl : SOURCE_DEFAULTS[id].api;
+    const iiifBaseUrl = isPrimary ? env.iiif.baseUrl : SOURCE_DEFAULTS[id].iiif;
+    const pinned = isPrimary ? Boolean(process.env.IIIF_BASE_URL) : true;
+    const images = buildImages(iiifBaseUrl, pinned);
+
+    if (id === "artic") {
+      return new ArticSource(apiBaseUrl, images, env.museum.catalogLimit);
+    }
+
+    const startPage = Math.max(1, Number(state.wellcomeNextPage) || 1);
+    return new WellcomeSource(apiBaseUrl, images, env.museum.catalogLimit, startPage);
+  });
 }
 
 function assertConfig(): void {
@@ -120,16 +146,20 @@ function assertConfig(): void {
   if (!env.aws.s3PublicBaseUrl) missing.push("S3_PUBLIC_BASE_URL");
   if (!env.supabase.url) missing.push("SUPABASE_URL");
   if (!env.supabase.serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (env.museum.sources.includes("harvard") && !env.harvard.apiKey) {
+    missing.push("HARVARD_API_KEY");
+  }
   if (missing.length) {
     throw new Error(
       `Ingestion is missing required env vars: ${missing.join(", ")}. ` +
         `Set them in the .env file (see .env.example).`,
     );
   }
-  if (env.museum.source === "artic") {
+  if (env.museum.sources.includes("artic")) {
     console.warn(
-      "WARNING: MUSEUM_SOURCE=artic — the Art Institute IIIF server blocks " +
-        "server-side downloads (403), so images will fail. Use 'wellcome'.",
+      "WARNING: MUSEUM_SOURCES includes 'artic' — the Art Institute IIIF " +
+        "server blocks server-side downloads (403), so its images will fail. " +
+        "Remove 'artic' from MUSEUM_SOURCES for ingestion.",
     );
   }
 }
@@ -307,21 +337,28 @@ async function main(): Promise<void> {
   assertConfig();
 
   const state = readState();
-  const startPage = Math.max(1, Number(state.wellcomeNextPage) || 1);
+  const sources = buildSources(state);
 
   console.log(
-    `Ingest: source=${env.museum.source} limit=${env.museum.catalogLimit} ` +
-      `startPage=${startPage} width=${env.ingest.imageWidth} → ` +
-      `s3://${env.aws.s3Bucket}/${env.aws.s3Prefix}`,
+    `Ingest: sources=${env.museum.sources.join(",")} limit=${env.museum.catalogLimit}` +
+      (env.museum.sources.includes("harvard")
+        ? ` harvardLimit=${env.harvard.catalogLimit}`
+        : "") +
+      ` width=${env.ingest.imageWidth} → s3://${env.aws.s3Bucket}/${env.aws.s3Prefix}`,
   );
 
-  const source = buildSource(startPage);
   const s3 = new S3ImageStore();
   const store = new SupabaseCatalogStore();
 
-  console.log("1/4 Fetching catalog from museum API…");
-  const { artworks, artists } = await source.fetchCatalog();
-  console.log(`     got ${artworks.length} artworks, ${artists.length} artists`);
+  console.log("1/4 Fetching catalogs from museum APIs…");
+  const artworks: Artwork[] = [];
+  const artists: Artist[] = [];
+  for (const source of sources) {
+    const data = await source.fetchCatalog();
+    artworks.push(...data.artworks);
+    artists.push(...data.artists);
+  }
+  console.log(`     got ${artworks.length} artworks, ${artists.length} artists (combined)`);
 
   console.log("2/4 Uploading artwork images to S3…");
   const { ready, stats } = await stageImages(artworks, s3);
@@ -347,12 +384,19 @@ async function main(): Promise<void> {
   await store.upsertArtists(finalArtists);
   await store.upsertArtworks(ready);
 
-  // Advance the cursor only after a successful upsert, so a failed run retries
-  // the same slice next time instead of skipping it.
-  if (source instanceof WellcomeSource) {
-    writeState({ ...state, wellcomeNextPage: source.nextStartPage });
-    console.log(`     next run resumes at Wellcome page ${source.nextStartPage}`);
+  // Advance each source's cursor only after a successful upsert, so a failed
+  // run retries the same slice next time instead of skipping it.
+  const nextState: IngestState = { ...state };
+  for (const source of sources) {
+    if (source instanceof WellcomeSource) {
+      nextState.wellcomeNextPage = source.nextStartPage;
+      console.log(`     next run resumes at Wellcome page ${source.nextStartPage}`);
+    } else if (source instanceof HarvardSource) {
+      nextState.harvardNextPage = source.nextStartPage;
+      console.log(`     next run resumes at Harvard page ${source.nextStartPage}`);
+    }
   }
+  writeState(nextState);
 
   const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.log(
