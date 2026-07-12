@@ -55,6 +55,8 @@ interface WcNote {
 interface WcLocation {
   locationType?: { id?: string };
   url?: string;
+  /** Attribution line on the IIIF image (usually the holding institution). */
+  credit?: string;
 }
 
 interface WcItem {
@@ -266,7 +268,7 @@ export class WellcomeSource implements MuseumSource {
       year: this.yearLabelOf(work),
       period: genres[0] || this.centuryOf(this.startYearOf(work)) || "—",
       medium: medium || "—",
-      source: "Wellcome Collection",
+      source: this.sourceOf(work),
       image: this.images.urlFor(identifier),
       accent: this.accentFor(work.id),
       description: this.describe(work),
@@ -332,6 +334,15 @@ export class WellcomeSource implements MuseumSource {
   }
 
   // ── Field extraction helpers ────────────────────────────────────────────
+
+  /** Credit / holding institution from the IIIF image location, when present. */
+  private sourceOf(work: WcWork): string {
+    const credit = (work.items ?? [])
+      .flatMap((item) => item.locations ?? [])
+      .map((location) => location.credit?.trim())
+      .find(Boolean);
+    return credit || "Wellcome Collection";
+  }
 
   /** The IIIF image identifier, taken from the thumbnail or iiif-image URL. */
   private identifierOf(work: WcWork): string | null {
@@ -502,7 +513,6 @@ export class WellcomeSource implements MuseumSource {
     const subjects = (work.subjects ?? []).slice(0, 4).map((s) => s.label);
     if (subjects.length) sentences.push(`Depicts ${subjects.join(", ")}.`);
 
-    sentences.push("From the Wellcome Collection.");
     return sentences.join(" ");
   }
 
