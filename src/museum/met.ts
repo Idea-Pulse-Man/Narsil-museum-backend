@@ -1,5 +1,5 @@
 /**
- * The Metropolitan Museum of Art — Open Access source (CSV + og:image).
+ * The Metropolitan Museum of Art — Open Access source (CSV + object API).
  * ---------------------------------------------------------------------------
  * Docs: https://github.com/metmuseum/openaccess , https://metmuseum.github.io/
  *
@@ -8,22 +8,22 @@
  * re-hosting the image to S3 and storing the row in Supabase is explicitly
  * permitted, and the data is safe for commercial use.
  *
- * Why the CSV (and not the JSON API): The Met's Public API
- * (collectionapi.metmuseum.org) rate-limits hard (HTTP 403/429) once a backfill
- * fires enough requests, and there is no "public-domain + has-image" query
- * filter — so discovering usable objects meant scanning thousands of records
- * and getting throttled. Instead this source reads The Met's bulk Open Access
- * CSV (hosted on GitHub, NOT a Met server, so never Met-rate-limited), which
- * carries every field we need — title, artist, bio, dating, medium, culture,
- * credit line, tags AND the `Is Public Domain` flag — entirely offline.
+ * Metadata comes from the bulk Open Access CSV; image URLs come from the JSON
+ * API — and the split is deliberate:
  *
- * The one thing the CSV lacks is the image URL. We resolve it per kept object
- * from that object's public page `og:image` meta tag (www.metmuseum.org — a
- * different host than the blocked API), then rewrite it to the ~800px
- * "web-large" variant and hand it to the ingest job to download + re-host to S3
- * exactly like any other source. Page fetches are paced and retried with
- * backoff; a persistent throttle fails the run loudly rather than silently
- * ingesting a handful.
+ *  - The Met's JSON API (collectionapi.metmuseum.org) has NO "public-domain +
+ *    has-image" query filter, so *discovering* usable objects through it meant
+ *    scanning thousands of records and getting rate-limited (403/429). The CSV
+ *    (hosted on GitHub — not a Met server, so never Met-rate-limited) carries
+ *    every metadata field we need AND the `Is Public Domain` flag, entirely
+ *    offline. We stream it to pick the exact public-domain objects to ingest.
+ *
+ *  - The CSV lacks the image URL, and The Met's public website
+ *    (www.metmuseum.org) blocks datacenter IPs (WAF), so page scraping is out.
+ *    So we call the JSON API for the image URL — but ONLY once per kept object
+ *    (never for scanning), which is ~30× fewer calls than before, keeping us
+ *    well under the throttle. Calls are paced and retried with backoff; a
+ *    persistent throttle fails the run loudly rather than ingesting a handful.
  */
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -80,16 +80,19 @@ const CSV_URL =
   "https://media.githubusercontent.com/media/metmuseum/openaccess/master/MetObjects.csv";
 const CACHE_DIR = ".met-cache";
 const CACHE_FILE = "MetObjects.csv";
+/** The Met JSON API — used ONLY to resolve the image URL of an object we've
+ *  already picked from the CSV (never for scanning). */
+const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
 
 /** Extra public-domain rows to pull per run beyond `limit`, to cover the few
- *  whose page has no resolvable image. */
+ *  with no image on the API record. */
 const ROW_BUFFER = 2;
-/** Object pages fetched concurrently when resolving og:image. Modest, to stay
- *  under www.metmuseum.org's rate limit. */
+/** Object records fetched concurrently when resolving image URLs. Modest, to
+ *  stay well under The Met API's rate limit. */
 const IMG_BATCH = 4;
-/** Pause between og:image batches. */
+/** Pause between image-resolution batches. */
 const BATCH_PAUSE_MS = 150;
-/** Per-page retries on a rate-limit / transient error. */
+/** Per-object retries on a rate-limit / transient error. */
 const IMG_RETRIES = 4;
 const DEFAULT_ACCENT = "#22242b";
 
@@ -107,7 +110,7 @@ class MetHttpError extends Error {
   }
 }
 
-/** Thrown when The Met keeps rate-limiting page fetches even after retries.
+/** Thrown when The Met keeps rate-limiting requests even after retries.
  *  The run fails loudly instead of silently ingesting a handful of works. */
 class MetRateLimitError extends Error {}
 
@@ -119,16 +122,16 @@ function isRetryableStatus(status: number): boolean {
   return status === 403 || status === 429 || status === 500 || status === 503;
 }
 
-async function fetchText(url: string, timeoutMs = 15_000): Promise<string> {
+async function fetchJsonMet<T>(url: string, timeoutMs = 15_000): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { Accept: "text/html,*/*", "User-Agent": BROWSER_UA },
+      headers: { Accept: "application/json", "User-Agent": BROWSER_UA },
     });
     if (!res.ok) throw new MetHttpError(res.status, url);
-    return await res.text();
+    return (await res.json()) as T;
   } finally {
     clearTimeout(timer);
   }
@@ -273,7 +276,7 @@ export class MetSource implements MuseumSource {
   // ── Image resolution (og:image) ─────────────────────────────────────────
 
   /**
-   * Resolve each row's image from its object page, keeping only rows that yield
+   * Resolve each row's image URL from the API, keeping only rows that yield
    * one, until we have `limit`. Returns the kept rows plus how many rows we
    * consumed (so the caller can advance the resume cursor precisely).
    */
@@ -302,28 +305,22 @@ export class MetSource implements MuseumSource {
   }
 
   /**
-   * Fetch an object page and pull the `og:image` URL, rewritten to the
-   * ~800px "web-large" variant. Retries rate-limit / transient errors with
-   * backoff; a persistent throttle throws `MetRateLimitError` (fail loudly). A
-   * page with no usable image resolves to null (skip that object).
+   * Resolve one object's image URL from the JSON API, preferring the ~800px
+   * "web-large" `primaryImageSmall`. Retries rate-limit / transient errors with
+   * backoff; a persistent throttle throws `MetRateLimitError` (fail loudly). An
+   * object with no image resolves to null (skip it).
    */
   private async resolveImage(row: MetObject): Promise<string | null> {
-    const pageUrl = row.objectURL;
-    if (!pageUrl) return null;
+    const url = `${MET_API_BASE}/objects/${row.objectID}`;
 
     for (let attempt = 0; attempt <= IMG_RETRIES; attempt++) {
       try {
-        const html = await fetchText(pageUrl);
-        const raw = this.ogImageOf(html);
-        // Accept a Met image host or any plain image URL; reject a non-image
-        // og:image (some pages fall back to a logo when there's no artwork).
-        if (!raw) return null;
-        if (!/metmuseum\.org/i.test(raw) && !/\.(jpe?g|png)(\?|$)/i.test(raw)) {
-          return null;
-        }
-        // The web-large variant is ~800px — plenty for the app, far smaller
-        // than the multi-MB "original".
-        return raw.replace("/original/", "/web-large/");
+        const rec = await fetchJsonMet<{
+          primaryImageSmall?: string;
+          primaryImage?: string;
+        }>(url);
+        const img = (rec.primaryImageSmall || rec.primaryImage || "").trim();
+        return img || null;
       } catch (err) {
         const retryable =
           (err instanceof MetHttpError && isRetryableStatus(err.status)) ||
@@ -331,24 +328,12 @@ export class MetSource implements MuseumSource {
         if (!retryable) return null;
         if (attempt >= IMG_RETRIES) {
           throw new MetRateLimitError(
-            "The Met object pages keep rate-limiting (HTTP 403/429). Wait " +
+            "The Met API keeps rate-limiting requests (HTTP 403/429). Wait " +
               "~15-30 min and re-run, and/or lower CATALOG_LIMIT.",
           );
         }
         await sleep(1000 * 2 ** attempt + (row.objectID % 37) * 12);
       }
-    }
-    return null;
-  }
-
-  private ogImageOf(html: string): string | null {
-    const patterns = [
-      /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
-      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
-    ];
-    for (const re of patterns) {
-      const m = html.match(re);
-      if (m?.[1]) return m[1];
     }
     return null;
   }
