@@ -8,3 +8,6 @@ npm-debug.log*
 
 # Ingestion resume cursor (per-machine state)
 .ingest-state.json
+
+# Cached Met Open Access CSV (~318 MB, re-downloadable)
+.met-cache/

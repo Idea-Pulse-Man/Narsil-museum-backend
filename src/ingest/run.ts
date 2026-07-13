@@ -115,10 +115,10 @@ function buildSources(state: IngestState): MuseumSource[] {
     const isPrimary = id === env.museum.source;
 
     if (id === "met") {
-      // The Met carries ready-made image URLs (no IIIF), so no ImageResolver.
-      const apiBaseUrl = isPrimary ? env.museum.apiBaseUrl : SOURCE_DEFAULTS.met.api;
+      // The Met source reads metadata from the Open Access CSV and resolves
+      // images from object-page og:image tags — no museum API, no IIIF.
       const startIndex = Math.max(0, Number(state.metNextIndex) || 0);
-      return new MetSource(apiBaseUrl, env.museum.catalogLimit, startIndex);
+      return new MetSource(env.museum.catalogLimit, startIndex);
     }
 
     const apiBaseUrl = isPrimary ? env.museum.apiBaseUrl : SOURCE_DEFAULTS[id].api;

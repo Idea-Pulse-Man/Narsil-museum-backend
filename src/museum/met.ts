@@ -1,32 +1,35 @@
 /**
- * The Metropolitan Museum of Art — Open Access source.
+ * The Metropolitan Museum of Art — Open Access source (CSV + og:image).
  * ---------------------------------------------------------------------------
- * Docs: https://metmuseum.github.io/
+ * Docs: https://github.com/metmuseum/openaccess , https://metmuseum.github.io/
  *
- * A CC0, key-free source. Every object flagged `isPublicDomain` is released
- * under a Creative Commons Zero dedication, so re-hosting the image to S3 and
- * storing the row in Supabase is explicitly permitted, and the data is safe for
- * commercial use.
+ * A CC0, key-free source. Every object flagged `Is Public Domain` in The Met's
+ * Open Access data is released under a Creative Commons Zero dedication, so
+ * re-hosting the image to S3 and storing the row in Supabase is explicitly
+ * permitted, and the data is safe for commercial use.
  *
- * Unlike Wellcome/Artic, The Met does NOT expose a IIIF Image API: each
- * object carries a ready-made image URL (`primaryImageSmall`, a ~800px "web
- * large" JPEG on images.metmuseum.org). This source therefore sets `image` to
- * that URL directly and does not touch `IiifImageService` — the ingest job
- * downloads it and re-hosts it to S3 exactly the same way.
+ * Why the CSV (and not the JSON API): The Met's Public API
+ * (collectionapi.metmuseum.org) rate-limits hard (HTTP 403/429) once a backfill
+ * fires enough requests, and there is no "public-domain + has-image" query
+ * filter — so discovering usable objects meant scanning thousands of records
+ * and getting throttled. Instead this source reads The Met's bulk Open Access
+ * CSV (hosted on GitHub, NOT a Met server, so never Met-rate-limited), which
+ * carries every field we need — title, artist, bio, dating, medium, culture,
+ * credit line, tags AND the `Is Public Domain` flag — entirely offline.
  *
- * The API has two relevant endpoints:
- *   GET /search?hasImages=true&…  → { total, objectIDs: number[] }  (image-bearing only)
- *   GET /objects/{id}             → full object record
- * There is no "isPublicDomain" query filter, so this source pages the
- * image-bearing id list from a persisted cursor, fetching records concurrently
- * and keeping the public-domain ones, until it has `limit` of them.
- *
- * Why /search and not /objects: /objects returns ALL ~490k ids, most of which
- * have no image (or aren't public-domain), so walking it sequentially gives a
- * dismal hit rate (a barren stretch can yield <1%). /search?hasImages=true
- * returns only the ~366k objects that actually have an image, so almost every
- * scanned record is a real candidate.
+ * The one thing the CSV lacks is the image URL. We resolve it per kept object
+ * from that object's public page `og:image` meta tag (www.metmuseum.org — a
+ * different host than the blocked API), then rewrite it to the ~800px
+ * "web-large" variant and hand it to the ingest job to download + re-host to S3
+ * exactly like any other source. Page fetches are paced and retried with
+ * backoff; a persistent throttle fails the run loudly rather than silently
+ * ingesting a handful.
  */
+import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { parse } from "csv-parse";
 import type { Artwork, Artist } from "../types/domain.js";
 import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
@@ -41,7 +44,7 @@ import {
   hashString,
 } from "../utils/text.js";
 
-// ── Upstream API shapes (only the fields we use) ───────────────────────────
+// ── The domain shape we map into (populated from CSV columns) ───────────────
 
 interface MetTag {
   term?: string;
@@ -49,9 +52,8 @@ interface MetTag {
 
 interface MetObject {
   objectID: number;
-  isPublicDomain?: boolean;
-  primaryImage?: string;
   primaryImageSmall?: string;
+  primaryImage?: string;
   title?: string;
   objectName?: string;
   culture?: string;
@@ -74,25 +76,28 @@ interface MetObject {
   tags?: MetTag[] | null;
 }
 
-interface MetObjectsResponse {
-  total?: number;
-  objectIDs?: number[] | null;
-}
+const CSV_URL =
+  "https://media.githubusercontent.com/media/metmuseum/openaccess/master/MetObjects.csv";
+const CACHE_DIR = ".met-cache";
+const CACHE_FILE = "MetObjects.csv";
 
-/** How many object records to request concurrently per batch. Kept modest so
- *  a big backfill stays well under The Met's rate limit. */
-const FETCH_BATCH = 5;
-/** Small pause between batches, as further rate-limit insurance. */
-const BATCH_PAUSE_MS = 120;
-/** Per-object detail-fetch retries on a rate-limit / transient error. */
-const DETAIL_RETRIES = 4;
+/** Extra public-domain rows to pull per run beyond `limit`, to cover the few
+ *  whose page has no resolvable image. */
+const ROW_BUFFER = 2;
+/** Object pages fetched concurrently when resolving og:image. Modest, to stay
+ *  under www.metmuseum.org's rate limit. */
+const IMG_BATCH = 4;
+/** Pause between og:image batches. */
+const BATCH_PAUSE_MS = 150;
+/** Per-page retries on a rate-limit / transient error. */
+const IMG_RETRIES = 4;
 const DEFAULT_ACCENT = "#22242b";
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-/** A non-OK HTTP response from The Met, carrying the status so callers can
- *  tell a rate-limit (403/429/503) apart from a plain miss (404). */
+/** A non-OK HTTP response, carrying the status so callers can tell a
+ *  rate-limit (403/429/503) apart from a plain miss (404). */
 class MetHttpError extends Error {
   constructor(
     public readonly status: number,
@@ -102,191 +107,253 @@ class MetHttpError extends Error {
   }
 }
 
-/** Thrown when The Met keeps rate-limiting us even after retries. The run
- *  fails loudly instead of silently ingesting a handful of works. */
+/** Thrown when The Met keeps rate-limiting page fetches even after retries.
+ *  The run fails loudly instead of silently ingesting a handful of works. */
 class MetRateLimitError extends Error {}
 
-/**
- * `fetch` + typed JSON with a browser-style User-Agent (The Met 403s some bot
- * agents) and a timeout. Throws `MetHttpError` (with status) on a non-OK
- * response so the retry layer can react to it.
- */
-async function fetchMetJson<T>(url: string, timeoutMs = 15_000): Promise<T> {
+const BROWSER_UA =
+  "Mozilla/5.0 (compatible; NarsilMuseumBot/1.0; " +
+  "+https://github.com/Idea-Pulse-Man/Narsil-museum-backend)";
+
+function isRetryableStatus(status: number): boolean {
+  return status === 403 || status === 429 || status === 500 || status === 503;
+}
+
+async function fetchText(url: string, timeoutMs = 15_000): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: {
-        Accept: "application/json",
-        "User-Agent":
-          "Mozilla/5.0 (compatible; NarsilMuseumBot/1.0; " +
-          "+https://github.com/Idea-Pulse-Man/Narsil-museum-backend)",
-      },
+      headers: { Accept: "text/html,*/*", "User-Agent": BROWSER_UA },
     });
     if (!res.ok) throw new MetHttpError(res.status, url);
-    return (await res.json()) as T;
+    return await res.text();
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** Rate-limit / transient statuses worth backing off and retrying. */
-function isRetryableStatus(status: number): boolean {
-  return status === 403 || status === 429 || status === 500 || status === 503;
-}
-
 export class MetSource implements MuseumSource {
   /**
-   * Index into the object-id list the NEXT run should resume from, so daily
-   * runs walk a fresh slice of the collection (wrapping at the end) rather than
-   * re-scanning the same ids. Read by the ingestion job.
+   * How many public-domain CSV rows the NEXT run should skip before collecting,
+   * so daily runs walk a fresh slice of the collection. Read by the ingest job.
    */
   nextStartIndex: number;
+  private skipBase = 0;
 
   constructor(
-    private readonly apiBaseUrl: string,
     private readonly limit: number,
-    /** Index into the id list to begin scanning from. Defaults to 0. */
+    /** Public-domain rows to skip before collecting. Defaults to 0. */
     private readonly startIndex = 0,
   ) {
     this.nextStartIndex = Math.max(0, startIndex);
   }
 
   async fetchCatalog(): Promise<CatalogData> {
-    const objects = await this.collectObjects();
-    return this.mapCatalog(objects);
+    const rows = await this.collectPublicDomainRows();
+    const { kept, consumed } = await this.attachImages(rows);
+    this.nextStartIndex = this.skipBase + consumed;
+
+    if (kept.length < this.limit) {
+      console.warn(
+        `  (Met: kept ${kept.length}/${this.limit} works — the object pages ` +
+          `may be rate-limiting, or this slice is image-sparse. Re-run to continue.)`,
+      );
+    }
+    return this.mapCatalog(kept);
   }
 
-  // ── Ingestion ───────────────────────────────────────────────────────────
+  // ── CSV ingestion ─────────────────────────────────────────────────────────
 
   /**
-   * Walk the object-id list from `startIndex`, fetching records concurrently
-   * and keeping public-domain works that have an image, until we have `limit`
-   * of them (or we've scanned a generous cap, so a sparse slice can't loop
-   * forever).
+   * Stream the Open Access CSV, skip `startIndex` public-domain rows, then
+   * collect the next `limit * ROW_BUFFER` public-domain rows (with metadata).
+   * Stops reading the 318 MB file as soon as it has enough.
    */
-  private async collectObjects(): Promise<MetObject[]> {
-    const ids = await this.fetchObjectIds();
-    const total = ids.length;
-    if (total === 0) return [];
+  private async collectPublicDomainRows(): Promise<MetObject[]> {
+    const path = await this.ensureCsv();
+    this.skipBase = Math.max(0, this.startIndex);
+    const target = this.limit * ROW_BUFFER;
 
-    const start = ((this.startIndex % total) + total) % total; // safe wrap
-    // The shuffled pool has a uniform public-domain rate, so a modest cap
-    // suffices — and it stops a sparse run from hammering the API for ages.
-    const scanCap = Math.min(total, this.limit * 12 + 500);
+    const rows: MetObject[] = [];
+    let pdSeen = 0;
 
-    const kept: MetObject[] = [];
-    let idx = start;
-    let scanned = 0;
+    const parser = createReadStream(path).pipe(
+      parse({
+        columns: true,
+        bom: true,
+        relaxQuotes: true,
+        relaxColumnCount: true,
+        skipRecordsWithError: true,
+      }),
+    );
 
-    while (kept.length < this.limit && scanned < scanCap) {
-      const batchIds: number[] = [];
-      for (let i = 0; i < FETCH_BATCH && scanned < scanCap; i++) {
-        batchIds.push(ids[idx]);
-        idx = (idx + 1) % total;
-        scanned++;
+    try {
+      for await (const rec of parser as AsyncIterable<Record<string, string>>) {
+        if ((rec["Is Public Domain"] ?? "").trim().toLowerCase() !== "true") {
+          continue;
+        }
+        pdSeen++;
+        if (pdSeen <= this.skipBase) continue;
+        const obj = this.rowToObject(rec);
+        if (Number.isFinite(obj.objectID) && obj.objectURL) rows.push(obj);
+        if (rows.length >= target) break;
       }
+    } finally {
+      parser.destroy();
+    }
 
-      const records = await this.fetchObjects(batchIds);
-      for (const record of records) {
-        if (record?.isPublicDomain && this.imageUrlOf(record)) {
-          kept.push(record);
+    // Ran off the end of the collection → wrap the cursor for the next run.
+    if (rows.length < target) this.skipBase = 0;
+    return rows;
+  }
+
+  /** Download the CSV to a local cache once (skipped if already present). */
+  private async ensureCsv(): Promise<string> {
+    const dir = join(process.cwd(), CACHE_DIR);
+    const file = join(dir, CACHE_FILE);
+    if (existsSync(file) && statSync(file).size > 1_000_000) return file;
+
+    mkdirSync(dir, { recursive: true });
+    console.log("     downloading The Met Open Access CSV (~318 MB, one-time)…");
+    const res = await fetch(CSV_URL, { headers: { "User-Agent": BROWSER_UA } });
+    if (!res.ok || !res.body) {
+      throw new Error(`Met CSV download failed: ${res.status} ${res.statusText}`);
+    }
+    await pipeline(
+      Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]),
+      createWriteStream(file),
+    );
+    console.log(`     CSV cached at ${file}`);
+    return file;
+  }
+
+  private rowToObject(rec: Record<string, string>): MetObject {
+    const val = (k: string): string | undefined => {
+      const v = (rec[k] ?? "").trim();
+      return v || undefined;
+    };
+    const int = (k: string): number | undefined => {
+      const n = Number(rec[k]);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const tags = (rec["Tags"] ?? "")
+      .split("|")
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .map((term) => ({ term }));
+
+    const link = val("Link Resource");
+    return {
+      objectID: Number(rec["Object ID"]),
+      title: val("Title"),
+      objectName: val("Object Name"),
+      culture: val("Culture"),
+      period: val("Period"),
+      dynasty: val("Dynasty"),
+      reign: val("Reign"),
+      artistDisplayName: val("Artist Display Name"),
+      artistDisplayBio: val("Artist Display Bio"),
+      artistNationality: val("Artist Nationality"),
+      artistBeginDate: val("Artist Begin Date"),
+      artistEndDate: val("Artist End Date"),
+      objectDate: val("Object Date"),
+      objectBeginDate: int("Object Begin Date"),
+      objectEndDate: int("Object End Date"),
+      medium: val("Medium"),
+      classification: val("Classification"),
+      department: val("Department"),
+      creditLine: val("Credit Line"),
+      objectURL: link ? link.replace(/^http:\/\//, "https://") : undefined,
+      tags,
+    };
+  }
+
+  // ── Image resolution (og:image) ─────────────────────────────────────────
+
+  /**
+   * Resolve each row's image from its object page, keeping only rows that yield
+   * one, until we have `limit`. Returns the kept rows plus how many rows we
+   * consumed (so the caller can advance the resume cursor precisely).
+   */
+  private async attachImages(
+    rows: MetObject[],
+  ): Promise<{ kept: MetObject[]; consumed: number }> {
+    const kept: MetObject[] = [];
+    let consumed = 0;
+
+    for (let i = 0; i < rows.length && kept.length < this.limit; i += IMG_BATCH) {
+      const batch = rows.slice(i, i + IMG_BATCH);
+      const urls = await Promise.all(batch.map((r) => this.resolveImage(r)));
+      for (let j = 0; j < batch.length; j++) {
+        consumed++;
+        if (urls[j]) {
+          kept.push({ ...batch[j], primaryImageSmall: urls[j]! });
           if (kept.length >= this.limit) break;
         }
       }
-      if (kept.length < this.limit && scanned < scanCap) {
+      if (kept.length < this.limit && i + IMG_BATCH < rows.length) {
         await sleep(BATCH_PAUSE_MS);
       }
     }
 
-    // Where the next run should resume (wrapped past the ids we scanned).
-    this.nextStartIndex = (start + scanned) % total;
-
-    if (kept.length < this.limit) {
-      console.warn(
-        `  (Met: scanned ${scanned} ids but only found ${kept.length}/` +
-          `${this.limit} public-domain works — raise the scan or try again)`,
-      );
-    }
-    return kept;
+    return { kept, consumed };
   }
 
   /**
-   * The ids of every object that HAS an image, via the search endpoint, then
-   * deterministically shuffled. One (large) call per run.
-   *
-   * `q=*` with a date range spanning the whole collection matches everything;
-   * `hasImages=true` restricts it to image-bearing objects (~366k). The shuffle
-   * spreads public-domain works — which cluster at the low (older) object ids —
-   * evenly across the list, so ANY resume-cursor position sees the same high
-   * hit rate. A fixed seed keeps the order stable across runs, so the cursor
-   * still resumes correctly.
+   * Fetch an object page and pull the `og:image` URL, rewritten to the
+   * ~800px "web-large" variant. Retries rate-limit / transient errors with
+   * backoff; a persistent throttle throws `MetRateLimitError` (fail loudly). A
+   * page with no usable image resolves to null (skip that object).
    */
-  private async fetchObjectIds(): Promise<number[]> {
-    const res = await fetchMetJson<MetObjectsResponse>(
-      `${this.apiBaseUrl}/search` +
-        `?hasImages=true&dateBegin=-5000&dateEnd=3000&q=*`,
-      30_000,
-    );
-    const ids = [...(res.objectIDs ?? [])].sort((a, b) => a - b);
-    return this.deterministicShuffle(ids);
-  }
+  private async resolveImage(row: MetObject): Promise<string | null> {
+    const pageUrl = row.objectURL;
+    if (!pageUrl) return null;
 
-  /** Fetch a batch of object records concurrently. A persistent rate-limit
-   *  bubbles up (via fetchObjectDetail) and aborts the whole run. */
-  private async fetchObjects(ids: number[]): Promise<(MetObject | null)[]> {
-    return Promise.all(ids.map((id) => this.fetchObjectDetail(id)));
-  }
-
-  /**
-   * Fetch one object record, retrying with exponential backoff on rate-limit /
-   * transient errors. A plain miss (404) resolves to null (skip the object); a
-   * rate-limit that survives every retry throws `MetRateLimitError` so the run
-   * fails loudly rather than silently ingesting almost nothing.
-   */
-  private async fetchObjectDetail(id: number): Promise<MetObject | null> {
-    const url = `${this.apiBaseUrl}/objects/${id}`;
-    for (let attempt = 0; attempt <= DETAIL_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= IMG_RETRIES; attempt++) {
       try {
-        return await fetchMetJson<MetObject>(url);
+        const html = await fetchText(pageUrl);
+        const raw = this.ogImageOf(html);
+        // Accept a Met image host or any plain image URL; reject a non-image
+        // og:image (some pages fall back to a logo when there's no artwork).
+        if (!raw) return null;
+        if (!/metmuseum\.org/i.test(raw) && !/\.(jpe?g|png)(\?|$)/i.test(raw)) {
+          return null;
+        }
+        // The web-large variant is ~800px — plenty for the app, far smaller
+        // than the multi-MB "original".
+        return raw.replace("/original/", "/web-large/");
       } catch (err) {
         const retryable =
           (err instanceof MetHttpError && isRetryableStatus(err.status)) ||
           (err instanceof Error && err.name === "AbortError");
-        if (!retryable) return null; // 404 etc. — just skip this object
-        if (attempt >= DETAIL_RETRIES) {
+        if (!retryable) return null;
+        if (attempt >= IMG_RETRIES) {
           throw new MetRateLimitError(
-            "The Met API keeps rate-limiting requests (HTTP 403/429). Wait " +
+            "The Met object pages keep rate-limiting (HTTP 403/429). Wait " +
               "~15-30 min and re-run, and/or lower CATALOG_LIMIT.",
           );
         }
-        // Exponential backoff with jitter: ~0.8s, 1.6s, 3.2s, 6.4s (+0-400ms).
-        await sleep(800 * 2 ** attempt + Math.floor((id % 41) * 10));
+        await sleep(1000 * 2 ** attempt + (row.objectID % 37) * 12);
       }
     }
     return null;
   }
 
-  /** Fisher–Yates shuffle driven by a fixed-seed PRNG (mulberry32), so the
-   *  order is random but identical on every run. */
-  private deterministicShuffle(ids: number[]): number[] {
-    const arr = [...ids];
-    let seed = 0x9e3779b9;
-    const rand = (): number => {
-      seed = (seed + 0x6d2b79f5) | 0;
-      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(rand() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
+  private ogImageOf(html: string): string | null {
+    const patterns = [
+      /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
+    ];
+    for (const re of patterns) {
+      const m = html.match(re);
+      if (m?.[1]) return m[1];
     }
-    return arr;
+    return null;
   }
 
-  // ── Mapping ───────────────────────────────────────────────────────────────
+  // ── Mapping (identical shape to any other MuseumSource) ─────────────────────
 
   private mapCatalog(objects: MetObject[]): CatalogData {
     interface ArtistAccumulator {
@@ -417,13 +484,12 @@ export class MetSource implements MuseumSource {
       // No social graph upstream — synthesise stable, plausible numbers.
       followers: seededInt(acc.id, 5_000, 900_000),
       likes: seededInt(acc.id + ":likes", 20_000, 3_000_000),
-      saves: seededInt(acc.id + ":saves", 8_000, 800_000),
+      saves: seededInt(acc.id + ":saves", 8_000, 500_000),
     };
   }
 
   // ── Field extraction helpers ────────────────────────────────────────────
 
-  /** Prefer the ~800px "web large" image; fall back to the full-res one. */
   private imageUrlOf(record: MetObject): string {
     return (record.primaryImageSmall || record.primaryImage || "").trim();
   }

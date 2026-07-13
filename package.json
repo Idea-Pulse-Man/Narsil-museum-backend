@@ -21,6 +21,7 @@
     "@aws-sdk/client-s3": "^3.717.0",
     "@supabase/supabase-js": "^2.47.10",
     "cors": "^2.8.5",
+    "csv-parse": "^7.0.1",
     "dotenv": "^16.4.7",
     "express": "^4.21.2"
   },
