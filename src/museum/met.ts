@@ -84,9 +84,13 @@ const CACHE_FILE = "MetObjects.csv";
  *  already picked from the CSV (never for scanning). */
 const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
 
-/** Extra public-domain rows to pull per run beyond `limit`, to cover the few
- *  with no image on the API record. */
-const ROW_BUFFER = 2;
+/** Extra public-domain rows to pull per run beyond `limit`, to cover rows
+ *  dropped as duplicates or with no image on the API record. */
+const ROW_BUFFER = 3;
+/** Max artworks with the same (title + artist) to keep per run. The Met holds
+ *  dozens of generically-titled decorative fragments ("Andiron", "Buckle",
+ *  "Rosette"); capping keeps the feed varied instead of flooding it. */
+const MAX_PER_LABEL = 1;
 /** Object records fetched concurrently when resolving image URLs. Deliberately
  *  tiny — a big backfill's budget is spent over time, not in a burst. */
 const IMG_BATCH = 2;
@@ -287,6 +291,8 @@ export class MetSource implements MuseumSource {
     rows: MetObject[],
   ): Promise<{ kept: MetObject[]; consumed: number }> {
     const kept: MetObject[] = [];
+    const seenImage = new Set<string>();
+    const labelCount = new Map<string, number>();
     let consumed = 0;
 
     for (let i = 0; i < rows.length && kept.length < this.limit; i += IMG_BATCH) {
@@ -311,10 +317,22 @@ export class MetSource implements MuseumSource {
 
       for (let j = 0; j < batch.length; j++) {
         consumed++;
-        if (urls[j]) {
-          kept.push({ ...batch[j], primaryImageSmall: urls[j]! });
-          if (kept.length >= this.limit) break;
-        }
+        const url = urls[j];
+        if (!url) continue;
+
+        // Drop an exact-image duplicate: The Met shares one photo across some
+        // catalogue numbers (e.g. a pair of andirons → met-46 / met-47).
+        if (seenImage.has(url)) continue;
+
+        // Cap generically-titled works so a run of "Andiron" x46 doesn't flood
+        // the feed — different objects, but visually repetitive.
+        const label = this.dedupLabelOf(batch[j]);
+        if ((labelCount.get(label) ?? 0) >= MAX_PER_LABEL) continue;
+
+        seenImage.add(url);
+        labelCount.set(label, (labelCount.get(label) ?? 0) + 1);
+        kept.push({ ...batch[j], primaryImageSmall: url });
+        if (kept.length >= this.limit) break;
       }
       if (kept.length < this.limit && i + IMG_BATCH < rows.length) {
         await sleep(BATCH_PAUSE_MS);
@@ -322,6 +340,13 @@ export class MetSource implements MuseumSource {
     }
 
     return { kept, consumed };
+  }
+
+  /** Dedup key: normalized title + artist. Two works with the same key are
+   *  treated as visually redundant for feed purposes. */
+  private dedupLabelOf(record: MetObject): string {
+    const title = this.titleOf(record).toLowerCase().replace(/\s+/g, " ").trim();
+    return `${this.artistIdOf(this.artistNameOf(record))}::${title}`;
   }
 
   /**
