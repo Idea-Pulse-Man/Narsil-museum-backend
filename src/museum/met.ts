@@ -30,7 +30,6 @@
 import type { Artwork, Artist } from "../types/domain.js";
 import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
-import { fetchJson } from "../utils/http.js";
 import {
   stripHtml,
   slugify,
@@ -80,9 +79,62 @@ interface MetObjectsResponse {
   objectIDs?: number[] | null;
 }
 
-/** How many object records to request concurrently per batch. */
-const FETCH_BATCH = 8;
+/** How many object records to request concurrently per batch. Kept modest so
+ *  a big backfill stays well under The Met's rate limit. */
+const FETCH_BATCH = 5;
+/** Small pause between batches, as further rate-limit insurance. */
+const BATCH_PAUSE_MS = 120;
+/** Per-object detail-fetch retries on a rate-limit / transient error. */
+const DETAIL_RETRIES = 4;
 const DEFAULT_ACCENT = "#22242b";
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A non-OK HTTP response from The Met, carrying the status so callers can
+ *  tell a rate-limit (403/429/503) apart from a plain miss (404). */
+class MetHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    url: string,
+  ) {
+    super(`GET ${url} → ${status}`);
+  }
+}
+
+/** Thrown when The Met keeps rate-limiting us even after retries. The run
+ *  fails loudly instead of silently ingesting a handful of works. */
+class MetRateLimitError extends Error {}
+
+/**
+ * `fetch` + typed JSON with a browser-style User-Agent (The Met 403s some bot
+ * agents) and a timeout. Throws `MetHttpError` (with status) on a non-OK
+ * response so the retry layer can react to it.
+ */
+async function fetchMetJson<T>(url: string, timeoutMs = 15_000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+        "User-Agent":
+          "Mozilla/5.0 (compatible; NarsilMuseumBot/1.0; " +
+          "+https://github.com/Idea-Pulse-Man/Narsil-museum-backend)",
+      },
+    });
+    if (!res.ok) throw new MetHttpError(res.status, url);
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Rate-limit / transient statuses worth backing off and retrying. */
+function isRetryableStatus(status: number): boolean {
+  return status === 403 || status === 429 || status === 500 || status === 503;
+}
 
 export class MetSource implements MuseumSource {
   /**
@@ -120,7 +172,9 @@ export class MetSource implements MuseumSource {
     if (total === 0) return [];
 
     const start = ((this.startIndex % total) + total) % total; // safe wrap
-    const scanCap = Math.min(total, this.limit * 30 + 300);
+    // The shuffled pool has a uniform public-domain rate, so a modest cap
+    // suffices — and it stops a sparse run from hammering the API for ages.
+    const scanCap = Math.min(total, this.limit * 12 + 500);
 
     const kept: MetObject[] = [];
     let idx = start;
@@ -141,39 +195,95 @@ export class MetSource implements MuseumSource {
           if (kept.length >= this.limit) break;
         }
       }
+      if (kept.length < this.limit && scanned < scanCap) {
+        await sleep(BATCH_PAUSE_MS);
+      }
     }
 
     // Where the next run should resume (wrapped past the ids we scanned).
     this.nextStartIndex = (start + scanned) % total;
+
+    if (kept.length < this.limit) {
+      console.warn(
+        `  (Met: scanned ${scanned} ids but only found ${kept.length}/` +
+          `${this.limit} public-domain works — raise the scan or try again)`,
+      );
+    }
     return kept;
   }
 
   /**
-   * The ids of every object that HAS an image, via the search endpoint. One
-   * (large) call per run. Sorted ascending so walking by index resumes
-   * deterministically across runs (search order is otherwise unspecified).
+   * The ids of every object that HAS an image, via the search endpoint, then
+   * deterministically shuffled. One (large) call per run.
    *
    * `q=*` with a date range spanning the whole collection matches everything;
-   * `hasImages=true` restricts it to image-bearing objects (~366k).
+   * `hasImages=true` restricts it to image-bearing objects (~366k). The shuffle
+   * spreads public-domain works — which cluster at the low (older) object ids —
+   * evenly across the list, so ANY resume-cursor position sees the same high
+   * hit rate. A fixed seed keeps the order stable across runs, so the cursor
+   * still resumes correctly.
    */
   private async fetchObjectIds(): Promise<number[]> {
-    const res = await fetchJson<MetObjectsResponse>(
+    const res = await fetchMetJson<MetObjectsResponse>(
       `${this.apiBaseUrl}/search` +
         `?hasImages=true&dateBegin=-5000&dateEnd=3000&q=*`,
-      { timeoutMs: 30_000 },
+      30_000,
     );
-    const ids = res.objectIDs ?? [];
-    return [...ids].sort((a, b) => a - b);
+    const ids = [...(res.objectIDs ?? [])].sort((a, b) => a - b);
+    return this.deterministicShuffle(ids);
   }
 
-  /** Fetch a batch of object records concurrently; failures drop to null. */
+  /** Fetch a batch of object records concurrently. A persistent rate-limit
+   *  bubbles up (via fetchObjectDetail) and aborts the whole run. */
   private async fetchObjects(ids: number[]): Promise<(MetObject | null)[]> {
-    const settled = await Promise.allSettled(
-      ids.map((id) =>
-        fetchJson<MetObject>(`${this.apiBaseUrl}/objects/${id}`),
-      ),
-    );
-    return settled.map((s) => (s.status === "fulfilled" ? s.value : null));
+    return Promise.all(ids.map((id) => this.fetchObjectDetail(id)));
+  }
+
+  /**
+   * Fetch one object record, retrying with exponential backoff on rate-limit /
+   * transient errors. A plain miss (404) resolves to null (skip the object); a
+   * rate-limit that survives every retry throws `MetRateLimitError` so the run
+   * fails loudly rather than silently ingesting almost nothing.
+   */
+  private async fetchObjectDetail(id: number): Promise<MetObject | null> {
+    const url = `${this.apiBaseUrl}/objects/${id}`;
+    for (let attempt = 0; attempt <= DETAIL_RETRIES; attempt++) {
+      try {
+        return await fetchMetJson<MetObject>(url);
+      } catch (err) {
+        const retryable =
+          (err instanceof MetHttpError && isRetryableStatus(err.status)) ||
+          (err instanceof Error && err.name === "AbortError");
+        if (!retryable) return null; // 404 etc. — just skip this object
+        if (attempt >= DETAIL_RETRIES) {
+          throw new MetRateLimitError(
+            "The Met API keeps rate-limiting requests (HTTP 403/429). Wait " +
+              "~15-30 min and re-run, and/or lower CATALOG_LIMIT.",
+          );
+        }
+        // Exponential backoff with jitter: ~0.8s, 1.6s, 3.2s, 6.4s (+0-400ms).
+        await sleep(800 * 2 ** attempt + Math.floor((id % 41) * 10));
+      }
+    }
+    return null;
+  }
+
+  /** Fisher–Yates shuffle driven by a fixed-seed PRNG (mulberry32), so the
+   *  order is random but identical on every run. */
+  private deterministicShuffle(ids: number[]): number[] {
+    const arr = [...ids];
+    let seed = 0x9e3779b9;
+    const rand = (): number => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
   }
 
   // ── Mapping ───────────────────────────────────────────────────────────────
