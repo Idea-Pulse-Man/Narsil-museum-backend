@@ -87,13 +87,16 @@ const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
 /** Extra public-domain rows to pull per run beyond `limit`, to cover the few
  *  with no image on the API record. */
 const ROW_BUFFER = 2;
-/** Object records fetched concurrently when resolving image URLs. Modest, to
- *  stay well under The Met API's rate limit. */
-const IMG_BATCH = 4;
-/** Pause between image-resolution batches. */
-const BATCH_PAUSE_MS = 150;
+/** Object records fetched concurrently when resolving image URLs. Deliberately
+ *  tiny — a big backfill's budget is spent over time, not in a burst. */
+const IMG_BATCH = 2;
+/** Pause between image-resolution batches (~2 requests/second overall). */
+const BATCH_PAUSE_MS = 1_000;
 /** Per-object retries on a rate-limit / transient error. */
-const IMG_RETRIES = 4;
+const IMG_RETRIES = 5;
+/** Backoff waits between those retries: ride out a throttle window rather than
+ *  give up while it's still hot. Worst case ~8.5 min for one object. */
+const RETRY_WAITS_MS = [2_000, 8_000, 30_000, 120_000, 300_000];
 const DEFAULT_ACCENT = "#22242b";
 
 const sleep = (ms: number): Promise<void> =>
@@ -288,7 +291,24 @@ export class MetSource implements MuseumSource {
 
     for (let i = 0; i < rows.length && kept.length < this.limit; i += IMG_BATCH) {
       const batch = rows.slice(i, i + IMG_BATCH);
-      const urls = await Promise.all(batch.map((r) => this.resolveImage(r)));
+
+      let urls: (string | null)[];
+      try {
+        urls = await Promise.all(batch.map((r) => this.resolveImage(r)));
+      } catch (err) {
+        if (err instanceof MetRateLimitError) {
+          // The throttle outlasted every retry. Keep what we already resolved
+          // (the run ingests a partial slice and the cursor only advances past
+          // consumed rows), so re-running later continues from right here.
+          console.warn(
+            `  (Met: rate-limited after resolving ${kept.length} works — ` +
+              `ingesting those and stopping; re-run later to continue)`,
+          );
+          break;
+        }
+        throw err;
+      }
+
       for (let j = 0; j < batch.length; j++) {
         consumed++;
         if (urls[j]) {
@@ -332,7 +352,11 @@ export class MetSource implements MuseumSource {
               "~15-30 min and re-run, and/or lower CATALOG_LIMIT.",
           );
         }
-        await sleep(1000 * 2 ** attempt + (row.objectID % 37) * 12);
+        const wait = RETRY_WAITS_MS[Math.min(attempt, RETRY_WAITS_MS.length - 1)];
+        console.warn(
+          `  (Met: throttled on object ${row.objectID}, waiting ${Math.round(wait / 1000)}s…)`,
+        );
+        await sleep(wait + (row.objectID % 37) * 12);
       }
     }
     return null;
