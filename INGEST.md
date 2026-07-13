@@ -7,22 +7,26 @@ images straight from S3.
 
 ```
 Wellcome Collection API   ──►  download IIIF image     ──►  S3 (public)  ─┐
-Harvard Art Museums API   ──►  download IIIF image     ──►  S3 (public)  ─┼─►  Supabase rows  ──►  app
+The Met (Open Access) API ──►  download image URL       ──►  S3 (public)  ─┼─►  Supabase rows  ──►  app
 Wikidata (artist name)    ──►  download portrait image ──►  S3 (public)  ─┘
 ```
 
-Both sources are pulled in the **same** daily run (`MUSEUM_SOURCES=wellcome,harvard`)
+Both sources are pulled in the **same** daily run (`MUSEUM_SOURCES=wellcome,met`)
 and merged before staging — every run grows the catalog from both museums.
 Artist/artwork ids carry a source prefix (`wc-…`/`wellcome-artist-…` for
-Wellcome, `harvard-…`/`harvard-artist-…` for Harvard), so the merged catalog is
+Wellcome, `met-…`/`met-artist-…` for The Met), so the merged catalog is
 collision-free with no dedup logic needed.
+
+The Met is **CC0 (public domain)** and needs **no API key**; re-hosting its
+images to S3 and storing rows permanently is explicitly allowed and safe for
+commercial use.
 
 Artist portraits are resolved server-side (Wikidata) during the job, downloaded,
 and stored in S3 too (`artworks/artists/…`). Their URL is saved to
 `artists.avatar_url`, so the app shows portraits **with no live backend** — the
 old Vercel `/api/artist-photo` endpoint is no longer used by the client.
 
-> **Source note:** use `MUSEUM_SOURCES=wellcome,harvard` (or just `wellcome`).
+> **Source note:** use `MUSEUM_SOURCES=wellcome,met` (or just `wellcome`).
 > The Art Institute of Chicago (`artic`) IIIF server returns **403** to
 > server-side downloads, so its images cannot be stored in S3 — don't include
 > it in `MUSEUM_SOURCES` for ingestion.
@@ -50,11 +54,10 @@ nano .env        # fill in the values below
 Set at least these in `.env`:
 
 ```ini
-MUSEUM_SOURCES=wellcome,harvard
+MUSEUM_SOURCES=wellcome,met
 CATALOG_LIMIT=120
 
-# Free key from https://harvardartmuseums.org/collections/api
-HARVARD_API_KEY=<paste your Harvard Art Museums API key here>
+# The Met needs no API key (CC0, key-free).
 
 AWS_REGION=us-east-2
 S3_BUCKET=narsil-backend-images
@@ -91,7 +94,7 @@ Verify:
 
 - **Supabase** → Table editor → `artworks` has rows with `image_url` set to
   `https://narsil-backend-images.s3.us-east-2.amazonaws.com/artworks/wc-….jpg`
-  (Wellcome) and `…/artworks/harvard-….jpg` (Harvard).
+  (Wellcome) and `…/artworks/met-….jpg` (The Met).
 - Open one of those URLs in a browser — the image should load.
 - Open the app — the feed/search/discover screens show the museum art.
 
@@ -125,10 +128,8 @@ npm install            # only if dependencies changed
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `MUSEUM_SOURCES` | wellcome | Comma list of sources to ingest each run, e.g. `wellcome,harvard` |
-| `HARVARD_API_KEY` | — | Required when `harvard` is in `MUSEUM_SOURCES` — free key from the [Harvard API form](https://harvardartmuseums.org/collections/api) |
+| `MUSEUM_SOURCES` | wellcome | Comma list of sources to ingest each run, e.g. `wellcome,met` |
 | `CATALOG_LIMIT` | 80 | How many artworks to ingest per run, per source |
-| `HARVARD_CATALOG_LIMIT` | `CATALOG_LIMIT` | Per-run artwork limit for Harvard specifically |
 | `INGEST_IMAGE_WIDTH` | 843 | Width (px) of the stored image |
 | `INGEST_SKIP_EXISTING` | true | Skip images already in S3 (set `false` to re-upload) |
 | `INGEST_CONCURRENCY` | 6 | Parallel downloads/uploads |
@@ -139,5 +140,5 @@ npm install            # only if dependencies changed
 
 Set `MUSEUM_SOURCES=wellcome` (or delete `MUSEUM_SOURCES` to fall back to
 `MUSEUM_SOURCE`) to revert to single-source ingestion with no code changes.
-Existing Harvard-sourced rows in Supabase/S3 simply stop growing — nothing is
+Existing Met-sourced rows in Supabase/S3 simply stop growing — nothing is
 deleted.

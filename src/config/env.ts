@@ -29,7 +29,7 @@ const corsOrigins = list(process.env.CORS_ORIGIN, [
 const imageDelivery =
   process.env.IMAGE_DELIVERY === "direct" ? "direct" : "proxy";
 
-const KNOWN_MUSEUM_SOURCES = ["wellcome", "artic", "harvard"] as const;
+const KNOWN_MUSEUM_SOURCES = ["wellcome", "artic", "met"] as const;
 export type MuseumSourceId = (typeof KNOWN_MUSEUM_SOURCES)[number];
 
 /** Source-specific defaults for the API + IIIF endpoints (env can override). */
@@ -42,25 +42,26 @@ export const SOURCE_DEFAULTS = {
     api: "https://api.artic.edu/api/v1",
     iiif: "https://www.artic.edu/iiif/2",
   },
-  harvard: {
-    api: "https://api.harvardartmuseums.org",
-    // Harvard embeds a per-image numeric id in the host path itself
-    // (`.../ids/iiif/{id}`) rather than appending it to a fixed base — see
-    // src/museum/harvard.ts for how the identifier is extracted.
-    iiif: "https://ids.lib.harvard.edu/ids/iiif",
+  met: {
+    api: "https://collectionapi.metmuseum.org/public/collection/v1",
+    // The Met has no IIIF Image API — each object carries a ready-made image
+    // URL. This entry only exists so SOURCE_DEFAULTS stays uniform; MetSource
+    // ignores it (see src/museum/met.ts).
+    iiif: "https://images.metmuseum.org",
   },
 } as const;
 
 /**
- * Which museum Public API(s) to source from, e.g. "wellcome,harvard".
+ * Which museum Public API(s) to source from, e.g. "wellcome,met".
  *  - "wellcome" (default): Wellcome Collection. Serves genuine IIIF Image API
  *    3.0 images that the backend can fetch and stream, so images always display
  *    regardless of the browser's network.
  *  - "artic": Art Institute of Chicago. Richer fine-art metadata, but its IIIF
  *    image server (www.artic.edu) blocks non-browser clients, so images can
  *    only be delivered via redirect and may be unreachable on some networks.
- *  - "harvard": Harvard Art Museums. Genuine IIIF images, requires a free
- *    HARVARD_API_KEY.
+ *  - "met": The Metropolitan Museum of Art. CC0 (public domain), no API key,
+ *    ~490k objects. Carries ready-made image URLs (no IIIF); re-hosting to S3
+ *    and permanent storage are allowed and safe for commercial use.
  *
  * `MUSEUM_SOURCES` (comma list) is read first; `MUSEUM_SOURCE` (singular) is
  * kept as a back-compat alias when `MUSEUM_SOURCES` is unset, so existing
@@ -114,21 +115,6 @@ export const env = {
     catalogLimit,
     /** In-memory cache lifetime for the built catalog. */
     cacheTtlMs: num(process.env.CATALOG_CACHE_TTL_MS, 60 * 60 * 1000),
-  },
-
-  /**
-   * Harvard Art Museums — second ingest source (see src/museum/harvard.ts).
-   * Only read by the ingestion job, and only required when "harvard" is in
-   * MUSEUM_SOURCES.
-   */
-  harvard: {
-    /** Free API key, requested via https://harvardartmuseums.org/collections/api */
-    apiKey: process.env.HARVARD_API_KEY ?? "",
-    apiBaseUrl: (
-      process.env.HARVARD_API_BASE_URL ?? SOURCE_DEFAULTS.harvard.api
-    ).replace(/\/$/, ""),
-    /** Falls back to CATALOG_LIMIT so each source's per-run size can be tuned independently. */
-    catalogLimit: num(process.env.HARVARD_CATALOG_LIMIT, catalogLimit),
   },
 
   iiif: {

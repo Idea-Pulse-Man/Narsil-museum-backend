@@ -20,7 +20,7 @@ import { IiifImageService } from "../museum/iiif.js";
 import { ImageResolver } from "../museum/imaging.js";
 import { ArticSource } from "../museum/artic.js";
 import { WellcomeSource } from "../museum/wellcome.js";
-import { HarvardSource } from "../museum/harvard.js";
+import { MetSource } from "../museum/met.js";
 import { getArtistPhotoUrl } from "../museum/artistPhoto.js";
 import type { MuseumSource } from "../museum/source.js";
 import type { Artwork, Artist } from "../types/domain.js";
@@ -46,7 +46,7 @@ const STATE_PATH = join(process.cwd(), ".ingest-state.json");
 
 interface IngestState {
   wellcomeNextPage?: number;
-  harvardNextPage?: number;
+  metNextIndex?: number;
 }
 
 function readState(): IngestState {
@@ -114,16 +114,11 @@ function buildSources(state: IngestState): MuseumSource[] {
   return env.museum.sources.map((id): MuseumSource => {
     const isPrimary = id === env.museum.source;
 
-    if (id === "harvard") {
-      const images = buildImages(SOURCE_DEFAULTS.harvard.iiif, true);
-      const startPage = Math.max(1, Number(state.harvardNextPage) || 1);
-      return new HarvardSource(
-        env.harvard.apiBaseUrl,
-        env.harvard.apiKey,
-        images,
-        env.harvard.catalogLimit,
-        startPage,
-      );
+    if (id === "met") {
+      // The Met carries ready-made image URLs (no IIIF), so no ImageResolver.
+      const apiBaseUrl = isPrimary ? env.museum.apiBaseUrl : SOURCE_DEFAULTS.met.api;
+      const startIndex = Math.max(0, Number(state.metNextIndex) || 0);
+      return new MetSource(apiBaseUrl, env.museum.catalogLimit, startIndex);
     }
 
     const apiBaseUrl = isPrimary ? env.museum.apiBaseUrl : SOURCE_DEFAULTS[id].api;
@@ -146,9 +141,6 @@ function assertConfig(): void {
   if (!env.aws.s3PublicBaseUrl) missing.push("S3_PUBLIC_BASE_URL");
   if (!env.supabase.url) missing.push("SUPABASE_URL");
   if (!env.supabase.serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  if (env.museum.sources.includes("harvard") && !env.harvard.apiKey) {
-    missing.push("HARVARD_API_KEY");
-  }
   if (missing.length) {
     throw new Error(
       `Ingestion is missing required env vars: ${missing.join(", ")}. ` +
@@ -341,9 +333,6 @@ async function main(): Promise<void> {
 
   console.log(
     `Ingest: sources=${env.museum.sources.join(",")} limit=${env.museum.catalogLimit}` +
-      (env.museum.sources.includes("harvard")
-        ? ` harvardLimit=${env.harvard.catalogLimit}`
-        : "") +
       ` width=${env.ingest.imageWidth} → s3://${env.aws.s3Bucket}/${env.aws.s3Prefix}`,
   );
 
@@ -391,9 +380,9 @@ async function main(): Promise<void> {
     if (source instanceof WellcomeSource) {
       nextState.wellcomeNextPage = source.nextStartPage;
       console.log(`     next run resumes at Wellcome page ${source.nextStartPage}`);
-    } else if (source instanceof HarvardSource) {
-      nextState.harvardNextPage = source.nextStartPage;
-      console.log(`     next run resumes at Harvard page ${source.nextStartPage}`);
+    } else if (source instanceof MetSource) {
+      nextState.metNextIndex = source.nextStartIndex;
+      console.log(`     next run resumes at Met index ${source.nextStartIndex}`);
     }
   }
   writeState(nextState);
