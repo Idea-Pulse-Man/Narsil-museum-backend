@@ -15,11 +15,17 @@
  * downloads it and re-hosts it to S3 exactly the same way.
  *
  * The API has two relevant endpoints:
- *   GET /objects          → { total, objectIDs: number[] }   (all ~490k ids)
- *   GET /objects/{id}     → full object record
- * There is no "public-domain + has-image" filter, so this source walks the id
- * list from a persisted cursor, fetching records concurrently and keeping the
- * ones that qualify, until it has `limit` of them.
+ *   GET /search?hasImages=true&…  → { total, objectIDs: number[] }  (image-bearing only)
+ *   GET /objects/{id}             → full object record
+ * There is no "isPublicDomain" query filter, so this source pages the
+ * image-bearing id list from a persisted cursor, fetching records concurrently
+ * and keeping the public-domain ones, until it has `limit` of them.
+ *
+ * Why /search and not /objects: /objects returns ALL ~490k ids, most of which
+ * have no image (or aren't public-domain), so walking it sequentially gives a
+ * dismal hit rate (a barren stretch can yield <1%). /search?hasImages=true
+ * returns only the ~366k objects that actually have an image, so almost every
+ * scanned record is a real candidate.
  */
 import type { Artwork, Artist } from "../types/domain.js";
 import type { CatalogData, MuseumSource } from "./source.js";
@@ -142,13 +148,22 @@ export class MetSource implements MuseumSource {
     return kept;
   }
 
-  /** The full list of object ids. One (large) call per run. */
+  /**
+   * The ids of every object that HAS an image, via the search endpoint. One
+   * (large) call per run. Sorted ascending so walking by index resumes
+   * deterministically across runs (search order is otherwise unspecified).
+   *
+   * `q=*` with a date range spanning the whole collection matches everything;
+   * `hasImages=true` restricts it to image-bearing objects (~366k).
+   */
   private async fetchObjectIds(): Promise<number[]> {
     const res = await fetchJson<MetObjectsResponse>(
-      `${this.apiBaseUrl}/objects`,
+      `${this.apiBaseUrl}/search` +
+        `?hasImages=true&dateBegin=-5000&dateEnd=3000&q=*`,
       { timeoutMs: 30_000 },
     );
-    return res.objectIDs ?? [];
+    const ids = res.objectIDs ?? [];
+    return [...ids].sort((a, b) => a - b);
   }
 
   /** Fetch a batch of object records concurrently; failures drop to null. */
