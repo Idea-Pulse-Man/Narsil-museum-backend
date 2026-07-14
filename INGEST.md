@@ -8,8 +8,10 @@ images straight from S3.
 ```
 Wellcome Collection API    ──►  download IIIF image    ──►  S3 (public)  ─┐
 The Met (Open Access) API  ──►  download image URL     ──►  S3 (public)  ─┤
-Cleveland (Open Access)    ──►  download CDN image     ──►  S3 (public)  ─┼─►  Supabase rows  ──►  app
-Rijksmuseum Data Services  ──►  download IIIF image    ──►  S3 (public)  ─┤
+Cleveland (Open Access)    ──►  download CDN image     ──►  S3 (public)  ─┤
+Rijksmuseum Data Services  ──►  download IIIF image    ──►  S3 (public)  ─┼─►  Supabase rows  ──►  app
+Flickr Commons (LoC + BL)  ──►  download CDN image     ──►  S3 (public)  ─┤
+Art Institute of Chicago   ──►  (image HOTLINKED — metadata only)        ─┤
 Wikidata (artist name)     ──►  download portrait image ──► S3 (public)  ─┘
 ```
 
@@ -31,11 +33,16 @@ and stored in S3 too (`artworks/artists/…`). Their URL is saved to
 `artists.avatar_url`, so the app shows portraits **with no live backend** — the
 old Vercel `/api/artist-photo` endpoint is no longer used by the client.
 
-> **Source note:** use any mix of `wellcome`, `met`, `cma`, `rijks`.
-> The Art Institute of Chicago (`artic`) IIIF server returns **403** to
-> server-side downloads (verified: every non-browser client is blocked,
-> regardless of User-Agent), so its images cannot be stored in S3 — don't
-> include it in `MUSEUM_SOURCES` for ingestion.
+> **Source note:** use any mix of `wellcome`, `met`, `cma`, `rijks`, `flickr`,
+> `artic`.
+>
+> - `flickr` (Library of Congress + British Library via Flickr Commons) needs
+>   the free `FLICKR_API_KEY` in `.env`; while it's unset the source is
+>   skipped with a notice, so it's safe to list ahead of getting the key.
+> - `artic` images are **hotlinked**, not stored in S3: the AIC IIIF server
+>   returns 403 to every non-browser client (verified), so the raw
+>   `www.artic.edu` image URL is stored and the browser loads it directly.
+>   Include it only if you accept those images living on AIC's servers.
 
 ---
 

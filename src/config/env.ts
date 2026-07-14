@@ -29,7 +29,14 @@ const corsOrigins = list(process.env.CORS_ORIGIN, [
 const imageDelivery =
   process.env.IMAGE_DELIVERY === "direct" ? "direct" : "proxy";
 
-const KNOWN_MUSEUM_SOURCES = ["wellcome", "artic", "met", "cma", "rijks"] as const;
+const KNOWN_MUSEUM_SOURCES = [
+  "wellcome",
+  "artic",
+  "met",
+  "cma",
+  "rijks",
+  "flickr",
+] as const;
 export type MuseumSourceId = (typeof KNOWN_MUSEUM_SOURCES)[number];
 
 /** Source-specific defaults for the API + IIIF endpoints (env can override). */
@@ -62,6 +69,11 @@ export const SOURCE_DEFAULTS = {
     // RijksSource never builds URLs from this base — kept for uniformity.
     iiif: "https://iiif.micr.io",
   },
+  flickr: {
+    api: "https://api.flickr.com/services/rest",
+    // Flickr photos carry ready-made CDN URLs — no IIIF. Kept for uniformity.
+    iiif: "https://live.staticflickr.com",
+  },
 } as const;
 
 /**
@@ -81,6 +93,11 @@ export const SOURCE_DEFAULTS = {
  *  - "rijks": Rijksmuseum, via the new Data Services (data.rijksmuseum.nl)
  *    Search API + Linked Art resolver + IIIF images. No API key. Only works
  *    whose image carries a public-domain rights mark are kept.
+ *  - "flickr": Flickr Commons photostreams — by default the Library of
+ *    Congress and the British Library, whose own APIs are unusable
+ *    server-side (Cloudflare wall / post-cyber-attack outage). Needs the
+ *    free FLICKR_API_KEY; only "no known copyright restrictions"/CC0/PD
+ *    photos are kept. Skipped with a notice while the key is unset.
  *
  * `MUSEUM_SOURCES` (comma list) is read first; `MUSEUM_SOURCE` (singular) is
  * kept as a back-compat alias when `MUSEUM_SOURCES` is unset, so existing
@@ -181,6 +198,17 @@ export const env = {
     url: (process.env.SUPABASE_URL ?? "").replace(/\/$/, ""),
     /** SERVICE ROLE key (server-side only — bypasses RLS to write the catalog). */
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+  },
+
+  flickr: {
+    /** Free API key (https://www.flickr.com/services/api/keys/). While unset,
+     *  the "flickr" source is skipped with a notice instead of failing. */
+    apiKey: process.env.FLICKR_API_KEY ?? "",
+    /**
+     * Flickr Commons account NSIDs to pull from. Defaults (see
+     * museum/flickr.ts): The Library of Congress + The British Library.
+     */
+    accounts: list(process.env.FLICKR_ACCOUNTS, []),
   },
 
   ingest: {

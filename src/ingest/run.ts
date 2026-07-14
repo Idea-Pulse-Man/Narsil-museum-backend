@@ -24,6 +24,11 @@ import { MetSource } from "../museum/met.js";
 import { CmaSource } from "../museum/cma.js";
 import { RijksSource } from "../museum/rijks.js";
 import {
+  FlickrSource,
+  DEFAULT_FLICKR_ACCOUNTS,
+  type FlickrAccount,
+} from "../museum/flickr.js";
+import {
   getArtistPhotoUrl,
   isUnresolvablePortraitName,
 } from "../museum/artistPhoto.js";
@@ -54,6 +59,20 @@ interface IngestState {
   metNextIndex?: number;
   cmaNextSkip?: number;
   rijksNextPageToken?: string;
+  /** Per-account resume pages, keyed by Flickr NSID. */
+  flickrNextPages?: Record<string, number>;
+}
+
+/**
+ * Artwork-id prefixes whose images are NOT staged to S3: the upstream server
+ * blocks server-side downloads but serves browsers fine, so the raw image URL
+ * is stored and the frontend hotlinks it. Trade-off: those images live on the
+ * museum's infrastructure, not ours.
+ */
+const HOTLINK_ID_PREFIXES = ["aic-"];
+
+function isHotlinked(artworkId: string): boolean {
+  return HOTLINK_ID_PREFIXES.some((prefix) => artworkId.startsWith(prefix));
 }
 
 function readState(): IngestState {
@@ -117,9 +136,37 @@ function buildImages(iiifBaseUrl: string, pinned: boolean): ImageResolver {
  * (primary) source — same behaviour as before multi-source support existed —
  * every other source always uses its own fixed defaults.
  */
+/** The configured Flickr accounts, keeping default medium hints when the
+ *  operator lists an NSID that's also in the defaults. */
+function flickrAccounts(): FlickrAccount[] {
+  if (env.flickr.accounts.length === 0) return [...DEFAULT_FLICKR_ACCOUNTS];
+  return env.flickr.accounts.map(
+    (nsid) =>
+      DEFAULT_FLICKR_ACCOUNTS.find((a) => a.nsid === nsid) ?? { nsid },
+  );
+}
+
 function buildSources(state: IngestState): MuseumSource[] {
-  return env.museum.sources.map((id): MuseumSource => {
+  const sources = env.museum.sources.map((id): MuseumSource | null => {
     const isPrimary = id === env.museum.source;
+
+    if (id === "flickr") {
+      if (!env.flickr.apiKey) {
+        console.warn(
+          "NOTE: MUSEUM_SOURCES includes 'flickr' but FLICKR_API_KEY is not " +
+            "set — skipping the Flickr Commons source this run. Get a free " +
+            "key at https://www.flickr.com/services/api/keys/ and add it to .env.",
+        );
+        return null;
+      }
+      return new FlickrSource(
+        SOURCE_DEFAULTS.flickr.api,
+        env.flickr.apiKey,
+        flickrAccounts(),
+        env.museum.catalogLimit,
+        state.flickrNextPages ?? {},
+      );
+    }
 
     if (id === "met") {
       // The Met source reads metadata from the Open Access CSV and resolves
@@ -158,6 +205,7 @@ function buildSources(state: IngestState): MuseumSource[] {
     const startPage = Math.max(1, Number(state.wellcomeNextPage) || 1);
     return new WellcomeSource(apiBaseUrl, images, env.museum.catalogLimit, startPage);
   });
+  return sources.filter((s): s is MuseumSource => s !== null);
 }
 
 function assertConfig(): void {
@@ -174,9 +222,10 @@ function assertConfig(): void {
   }
   if (env.museum.sources.includes("artic")) {
     console.warn(
-      "WARNING: MUSEUM_SOURCES includes 'artic' — the Art Institute IIIF " +
-        "server blocks server-side downloads (403), so its images will fail. " +
-        "Remove 'artic' from MUSEUM_SOURCES for ingestion.",
+      "NOTE: MUSEUM_SOURCES includes 'artic' — its IIIF server blocks " +
+        "server-side downloads (403), so AIC images are HOTLINKED: the raw " +
+        "www.artic.edu image URL is stored instead of an S3 copy. Browsers " +
+        "load them fine, but those images stay on AIC's infrastructure.",
     );
   }
 }
@@ -197,7 +246,9 @@ async function downloadOnce(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { headers, signal: controller.signal });
-    if (res.status === 429 || res.status === 503) {
+    // 502s observed transiently from CDNs (e.g. live.staticflickr.com) — one
+    // retry usually succeeds, so treat them like a throttle, not a hard fail.
+    if (res.status === 429 || res.status === 502 || res.status === 503) {
       const retryAfter = Number(res.headers.get("retry-after")) || 0;
       throw new RetryableError(res.status, retryAfter * 1000);
     }
@@ -278,6 +329,12 @@ async function stageImages(artworks: Artwork[], s3: S3ImageStore): Promise<{
       if (!upstream) {
         stats.failed++;
         return null;
+      }
+      // Hotlinked sources (see HOTLINK_ID_PREFIXES): store the upstream URL
+      // as-is — browsers can load it even though servers can't download it.
+      if (isHotlinked(art.id)) {
+        stats.skipped++;
+        return art;
       }
       const key = artworkKey(art.id);
       try {
@@ -423,6 +480,15 @@ async function main(): Promise<void> {
       console.log(
         `     next run resumes at Rijksmuseum page token ` +
           `${source.nextPageToken ?? "(start)"}`,
+      );
+    } else if (source instanceof FlickrSource) {
+      nextState.flickrNextPages = {
+        ...nextState.flickrNextPages,
+        ...source.nextPages,
+      };
+      console.log(
+        `     next run resumes at Flickr pages ` +
+          `${JSON.stringify(source.nextPages)}`,
       );
     }
   }
