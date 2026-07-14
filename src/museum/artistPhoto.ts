@@ -22,10 +22,28 @@ const UNRESOLVABLE =
   /^(unknown artist|unknown|anonymous|unidentified|various)$/i;
 
 const NON_PERSON =
-  /\b(workshop|atelier|manufactory|studio of|school of|master of|circle of|follower of|manner of|attributed to|imitator of|anonymous|unidentified)\b/i;
+  /\b(workshop|atelier|manufactory|studio of|school|master of|circle of|follower of|manner of|attributed to|imitator of|anonymous|unidentified)\b/i;
+
+// Wellcome-style generic descriptors that name no real person and must never
+// resolve to a stranger's photo: "a Chinese artist", "an English painter", etc.
+const GENERIC_DESCRIPTOR =
+  /^an?\s+.*\b(artist|painter|sculptor|engraver|printmaker|illustrator|dra[uf]ghtsman|photographer|architect|designer|potter|goldsmith|ceramicist|muralist|caricaturist|etcher|maker|master|craftsman|calligrapher|scribe)s?\b/i;
 
 const looksLikePerson =
   /\b(painter|artist|sculptor|engraver|printmaker|illustrator|draughtsman|photographer|architect|designer|potter|goldsmith|ceramicist|muralist|caricaturist|etcher|draftsman)\b/i;
+
+/**
+ * True when a name is an anonymous/generic attribution (workshop, national
+ * school, "a Chinese artist"…) that has no personal likeness — so we never
+ * resolve, download, or attach a portrait for it.
+ */
+export function isUnresolvablePortraitName(name: string): boolean {
+  const key = name.trim();
+  if (!key) return true;
+  return (
+    UNRESOLVABLE.test(key) || NON_PERSON.test(key) || GENERIC_DESCRIPTOR.test(key)
+  );
+}
 
 const USER_AGENT = "narsil-museum-backend/1.0 (+https://github.com/narsil)";
 
@@ -162,7 +180,7 @@ function writeCache(name: string, url: string | null): void {
 /** Resolve a portrait URL for an artist name, or null when none exists. */
 export function getArtistPhotoUrl(name: string): Promise<string | null> {
   const key = name.trim();
-  if (!key || UNRESOLVABLE.test(key) || NON_PERSON.test(key)) {
+  if (!key || isUnresolvablePortraitName(key)) {
     return Promise.resolve(null);
   }
 

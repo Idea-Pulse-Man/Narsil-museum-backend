@@ -21,7 +21,10 @@ import { ImageResolver } from "../museum/imaging.js";
 import { ArticSource } from "../museum/artic.js";
 import { WellcomeSource } from "../museum/wellcome.js";
 import { MetSource } from "../museum/met.js";
-import { getArtistPhotoUrl } from "../museum/artistPhoto.js";
+import {
+  getArtistPhotoUrl,
+  isUnresolvablePortraitName,
+} from "../museum/artistPhoto.js";
 import type { MuseumSource } from "../museum/source.js";
 import type { Artwork, Artist } from "../types/domain.js";
 import { S3ImageStore } from "./s3.js";
@@ -296,6 +299,13 @@ async function stageArtistPhotos(
     artists,
     portraitConcurrency,
     async (artist): Promise<Artist> => {
+      // Anonymous/generic makers ("a Chinese artist", workshops, national
+      // schools) have no personal likeness — never attach a portrait, and don't
+      // let a previously-uploaded S3 object resurface via skipExisting below.
+      if (isUnresolvablePortraitName(artist.name)) {
+        stats.skipped++;
+        return { ...artist, avatar: undefined };
+      }
       const key = artistKey(artist.id);
       try {
         if (env.ingest.skipExisting && (await s3.exists(key))) {
