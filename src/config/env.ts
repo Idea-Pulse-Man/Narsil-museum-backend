@@ -29,7 +29,7 @@ const corsOrigins = list(process.env.CORS_ORIGIN, [
 const imageDelivery =
   process.env.IMAGE_DELIVERY === "direct" ? "direct" : "proxy";
 
-const KNOWN_MUSEUM_SOURCES = ["wellcome", "artic", "met"] as const;
+const KNOWN_MUSEUM_SOURCES = ["wellcome", "artic", "met", "cma", "rijks"] as const;
 export type MuseumSourceId = (typeof KNOWN_MUSEUM_SOURCES)[number];
 
 /** Source-specific defaults for the API + IIIF endpoints (env can override). */
@@ -49,6 +49,19 @@ export const SOURCE_DEFAULTS = {
     // ignores it (see src/museum/met.ts).
     iiif: "https://images.metmuseum.org",
   },
+  cma: {
+    api: "https://openaccess-api.clevelandart.org/api",
+    // Like the Met, CMA records carry ready-made CDN image URLs — no IIIF.
+    // This entry only keeps SOURCE_DEFAULTS uniform; CmaSource ignores it.
+    iiif: "https://openaccess-cdn.clevelandart.org",
+  },
+  rijks: {
+    api: "https://data.rijksmuseum.nl",
+    // Rijksmuseum images ARE served via a IIIF Image API (micr.io), but each
+    // object's full image URL is discovered through its Linked Art records, so
+    // RijksSource never builds URLs from this base — kept for uniformity.
+    iiif: "https://iiif.micr.io",
+  },
 } as const;
 
 /**
@@ -62,6 +75,12 @@ export const SOURCE_DEFAULTS = {
  *  - "met": The Metropolitan Museum of Art. CC0 (public domain), no API key,
  *    ~490k objects. Carries ready-made image URLs (no IIIF); re-hosting to S3
  *    and permanent storage are allowed and safe for commercial use.
+ *  - "cma": Cleveland Museum of Art Open Access. CC0, no API key, ~41k works
+ *    with images, first-party `cc0=1&has_image=1` filters and ready-made CDN
+ *    image URLs — the friendliest source for ingestion.
+ *  - "rijks": Rijksmuseum, via the new Data Services (data.rijksmuseum.nl)
+ *    Search API + Linked Art resolver + IIIF images. No API key. Only works
+ *    whose image carries a public-domain rights mark are kept.
  *
  * `MUSEUM_SOURCES` (comma list) is read first; `MUSEUM_SOURCE` (singular) is
  * kept as a back-compat alias when `MUSEUM_SOURCES` is unset, so existing

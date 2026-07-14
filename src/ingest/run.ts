@@ -21,6 +21,8 @@ import { ImageResolver } from "../museum/imaging.js";
 import { ArticSource } from "../museum/artic.js";
 import { WellcomeSource } from "../museum/wellcome.js";
 import { MetSource } from "../museum/met.js";
+import { CmaSource } from "../museum/cma.js";
+import { RijksSource } from "../museum/rijks.js";
 import {
   getArtistPhotoUrl,
   isUnresolvablePortraitName,
@@ -50,6 +52,8 @@ const STATE_PATH = join(process.cwd(), ".ingest-state.json");
 interface IngestState {
   wellcomeNextPage?: number;
   metNextIndex?: number;
+  cmaNextSkip?: number;
+  rijksNextPageToken?: string;
 }
 
 function readState(): IngestState {
@@ -125,6 +129,24 @@ function buildSources(state: IngestState): MuseumSource[] {
     }
 
     const apiBaseUrl = isPrimary ? env.museum.apiBaseUrl : SOURCE_DEFAULTS[id].api;
+
+    if (id === "cma") {
+      // CMA records carry ready-made CDN image URLs — no IIIF resolver needed.
+      const startSkip = Math.max(0, Number(state.cmaNextSkip) || 0);
+      return new CmaSource(apiBaseUrl, env.museum.catalogLimit, startSkip);
+    }
+
+    if (id === "rijks") {
+      // Rijksmuseum image URLs are discovered per object via Linked Art and
+      // rewritten to the ingest width — no IIIF resolver needed here either.
+      return new RijksSource(
+        apiBaseUrl,
+        env.museum.catalogLimit,
+        env.ingest.imageWidth,
+        state.rijksNextPageToken,
+      );
+    }
+
     const iiifBaseUrl = isPrimary ? env.iiif.baseUrl : SOURCE_DEFAULTS[id].iiif;
     const pinned = isPrimary ? Boolean(process.env.IIIF_BASE_URL) : true;
     const images = buildImages(iiifBaseUrl, pinned);
@@ -393,6 +415,15 @@ async function main(): Promise<void> {
     } else if (source instanceof MetSource) {
       nextState.metNextIndex = source.nextStartIndex;
       console.log(`     next run resumes at Met index ${source.nextStartIndex}`);
+    } else if (source instanceof CmaSource) {
+      nextState.cmaNextSkip = source.nextStartSkip;
+      console.log(`     next run resumes at CMA skip ${source.nextStartSkip}`);
+    } else if (source instanceof RijksSource) {
+      nextState.rijksNextPageToken = source.nextPageToken;
+      console.log(
+        `     next run resumes at Rijksmuseum page token ` +
+          `${source.nextPageToken ?? "(start)"}`,
+      );
     }
   }
   writeState(nextState);
