@@ -546,7 +546,7 @@ export class RijksSource implements MuseumSource {
         ? work.typeLabel.charAt(0).toUpperCase() + work.typeLabel.slice(1)
         : this.centuryOf(work.startYear) || "—",
       medium: work.medium || "—",
-      source: "Rijksmuseum, Amsterdam",
+      source: "The Rijksmuseum",
       image: work.imageUrl,
       accent: this.accentFor(seed),
       description:

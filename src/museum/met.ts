@@ -125,6 +125,17 @@ const BROWSER_UA =
   "Mozilla/5.0 (compatible; NarsilMuseumBot/1.0; " +
   "+https://github.com/Idea-Pulse-Man/Narsil-museum-backend)";
 
+/**
+ * The Met CSV joins multi-constituent fields with "|" — e.g. an artist AND its
+ * publisher: "Goya (Francisco de Goya y Lucientes)|Gazette des Beaux-Arts".
+ * Displaying that raw reads as garbage; keep the primary (first) constituent.
+ */
+function primaryConstituent(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const first = value.split("|")[0].trim();
+  return first || undefined;
+}
+
 function isRetryableStatus(status: number): boolean {
   return status === 403 || status === 429 || status === 500 || status === 503;
 }
@@ -263,11 +274,11 @@ export class MetSource implements MuseumSource {
       period: val("Period"),
       dynasty: val("Dynasty"),
       reign: val("Reign"),
-      artistDisplayName: val("Artist Display Name"),
-      artistDisplayBio: val("Artist Display Bio"),
-      artistNationality: val("Artist Nationality"),
-      artistBeginDate: val("Artist Begin Date"),
-      artistEndDate: val("Artist End Date"),
+      artistDisplayName: primaryConstituent(val("Artist Display Name")),
+      artistDisplayBio: primaryConstituent(val("Artist Display Bio")),
+      artistNationality: primaryConstituent(val("Artist Nationality")),
+      artistBeginDate: primaryConstituent(val("Artist Begin Date")),
+      artistEndDate: primaryConstituent(val("Artist End Date")),
       objectDate: val("Object Date"),
       objectBeginDate: int("Object Begin Date"),
       objectEndDate: int("Object End Date"),
@@ -467,7 +478,9 @@ export class MetSource implements MuseumSource {
         record.department ||
         "—",
       medium: record.medium?.trim() || "—",
-      source: record.creditLine?.trim() || "The Metropolitan Museum of Art",
+      // The placard's MUSEUM line — always the holding institution, never the
+      // donor credit line (that goes into the description as provenance).
+      source: "The Met",
       image: this.imageUrlOf(record),
       accent: this.accentFor(String(record.objectID)),
       description: this.describe(record),
@@ -543,17 +556,32 @@ export class MetSource implements MuseumSource {
     return raw || record.objectName?.trim() || "Untitled";
   }
 
+  /**
+   * Wall-text style prose: "Etching, burin by Goya (Francisco de Goya y
+   * Lucientes), ca. 1815. Drawings and Prints, The Met, New York. Rogers Fund,
+   * 1918." — what it is, who made it, when, where it lives, and how it got
+   * there, instead of a raw field dump.
+   */
   private describe(record: MetObject): string {
-    const parts: string[] = [];
-    if (record.artistDisplayName) parts.push(record.artistDisplayName.trim());
-    if (record.medium) parts.push(record.medium.trim());
-    if (record.objectDate) parts.push(record.objectDate.trim());
-    if (record.culture) parts.push(`Culture: ${record.culture.trim()}`);
-    const composed = parts.join(" · ");
-    return (
-      composed ||
-      `${this.titleOf(record)} from the collection of The Metropolitan Museum of Art.`
-    );
+    const artist = this.artistNameOf(record);
+    const medium = record.medium?.trim();
+    const date = record.objectDate?.trim();
+
+    let lead =
+      medium || record.objectName?.trim() || this.titleOf(record);
+    lead = lead.charAt(0).toUpperCase() + lead.slice(1);
+    if (artist !== "Unknown Artist") lead += ` by ${artist}`;
+    if (date) lead += `, ${date}`;
+
+    const sentences = [`${lead}.`];
+    if (record.culture) sentences.push(`Culture: ${record.culture.trim()}.`);
+    if (record.department) {
+      sentences.push(`${record.department.trim()}, The Met, New York.`);
+    }
+    // Keep the donor credit line as provenance, museum-placard style.
+    const credit = record.creditLine?.trim().replace(/\.$/, "");
+    if (credit) sentences.push(`${credit}.`);
+    return sentences.join(" ");
   }
 
   private yearLabelOf(record: MetObject): string {

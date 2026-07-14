@@ -295,7 +295,8 @@ export class ArticSource implements MuseumSource {
       year: raw.date_display?.trim() || this.yearFromRange(raw),
       period: raw.style_title || raw.department_title || "—",
       medium: raw.medium_display?.trim() || "—",
-      source: raw.credit_line?.trim() || "Art Institute of Chicago",
+      // The placard's MUSEUM line — the institution, never the donor credit.
+      source: "The Art Institute of Chicago",
       image,
       accent: this.accentFrom(raw.color),
       description: this.describeArtwork(raw),

@@ -245,7 +245,8 @@ export class CmaSource implements MuseumSource {
       year: this.yearLabelOf(record),
       period: cultures[0] || record.collection || record.department || "—",
       medium: record.technique?.trim() || "—",
-      source: record.creditline?.trim() || "The Cleveland Museum of Art",
+      // The placard's MUSEUM line — the institution, never the donor credit.
+      source: "The Cleveland Museum of Art",
       image: this.imageUrlOf(record),
       accent: this.accentFor(String(record.id)),
       description: this.describe(record),
