@@ -219,6 +219,12 @@ export const env = {
     /** Store id — required when the token has access to multiple stores. */
     storeId: process.env.PRINTFUL_STORE_ID ?? "",
     /**
+     * Shared secret for the status webhook (Printful doesn't sign payloads,
+     * so the URL carries it: /api/printful/webhook?secret=<this>). The
+     * webhook answers 503 while unset.
+     */
+    webhookSecret: process.env.PRINTFUL_WEBHOOK_SECRET ?? "",
+    /**
      * Submit orders for fulfillment immediately ("true") or create drafts to
      * confirm by hand in the Printful dashboard (default — safe for dev).
      */
