@@ -18,6 +18,7 @@ import type { Artwork, Artist } from "../types/domain.js";
 import type { ImageResolver } from "./imaging.js";
 import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
+import { cleanArtistName } from "./artistName.js";
 import { fetchJson } from "../utils/http.js";
 import {
   stripHtml,
@@ -374,7 +375,7 @@ export class WellcomeSource implements MuseumSource {
   private artistNameOf(work: WcWork): string | null {
     const contributor = (work.contributors ?? []).find((c) => c.agent?.label);
     if (contributor?.agent?.label) {
-      return this.normalizeName(contributor.agent.label) || null;
+      return cleanArtistName(this.normalizeName(contributor.agent.label));
     }
 
     // Wellcome titles are richly formatted, e.g. "… Wood engraving by J. Jackson, 1845."
@@ -390,7 +391,7 @@ export class WellcomeSource implements MuseumSource {
     const name = raw.trim().replace(/\s+/g, " ");
     // Guard against picking up non-name phrases.
     if (name.length < 2 || name.length > 60 || /\d/.test(name)) return null;
-    return this.normalizeName(name) || null;
+    return cleanArtistName(this.normalizeName(name));
   }
 
   /**

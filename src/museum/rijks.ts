@@ -24,6 +24,7 @@
 import type { Artwork, Artist } from "../types/domain.js";
 import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
+import { cleanArtistName } from "./artistName.js";
 import { fetchJsonRetry, HttpStatusError } from "../utils/http.js";
 import {
   slugify,
@@ -376,10 +377,12 @@ export class RijksSource implements MuseumSource {
     const placardMatch = placard.match(/^(.*?)\s*\((\d{3,4}\s*[-–]\s*\d{3,4})\)/);
 
     const artistName =
-      (personName || attribution || placardMatch?.[1] || "")
-        .replace(NAME_QUALIFIER_RE, "")
-        .replace(/\s+/g, " ")
-        .trim() || "Unknown Artist";
+      cleanArtistName(
+        (personName || attribution || placardMatch?.[1] || "").replace(
+          NAME_QUALIFIER_RE,
+          "",
+        ),
+      ) ?? "Unknown Artist";
     const artistLifespan = placardMatch?.[2]?.replace(/\s*[-–]\s*/, " – ") ?? "";
     return { artistName, artistLifespan };
   }

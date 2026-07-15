@@ -18,6 +18,7 @@ import type { Artwork, Artist } from "../types/domain.js";
 import type { ImageResolver } from "./imaging.js";
 import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
+import { cleanArtistName } from "./artistName.js";
 import { fetchJson, chunk } from "../utils/http.js";
 import {
   stripHtml,
@@ -254,11 +255,12 @@ export class ArticSource implements MuseumSource {
   ): { artistId: string; artistName: string } {
     if (raw.artist_id != null) {
       const agent = agents.get(raw.artist_id);
-      const name = (agent?.title ?? raw.artist_title ?? "Unknown Artist").trim();
+      const name =
+        cleanArtistName(agent?.title ?? raw.artist_title) ?? "Unknown Artist";
       return { artistId: `aic-agent-${raw.artist_id}`, artistName: name };
     }
-    if (raw.artist_title) {
-      const name = raw.artist_title.trim();
+    const name = cleanArtistName(raw.artist_title);
+    if (name) {
       return { artistId: `aic-artist-${slugify(name)}`, artistName: name };
     }
     return { artistId: "unknown-artist", artistName: "Unknown Artist" };

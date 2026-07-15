@@ -17,6 +17,7 @@
 import type { Artwork, Artist } from "../types/domain.js";
 import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
+import { cleanArtistName } from "./artistName.js";
 import { fetchJsonRetry } from "../utils/http.js";
 import {
   stripHtml,
@@ -309,8 +310,7 @@ export class CmaSource implements MuseumSource {
   /** Creator name from "Paolo Veronese (Italian, 1528–1588)" → "Paolo Veronese". */
   private artistNameOf(record: CmaArtworkRecord): string {
     const description = (record.creators ?? [])[0]?.description ?? "";
-    const name = description.split("(")[0].replace(/\s+/g, " ").trim();
-    return name || "Unknown Artist";
+    return cleanArtistName(description.split("(")[0]) ?? "Unknown Artist";
   }
 
   /** Nationality from the creator parenthetical, e.g. "(Italian, 1528–1588)". */

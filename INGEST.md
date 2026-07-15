@@ -137,6 +137,14 @@ npm install            # only if dependencies changed
 # next cron run uses the new code (nothing to restart — it's a batch job)
 ```
 
+### One-time cleanup after the artist-name hygiene change
+
+Artist ids derive from the display name, so the first ingest after the
+name-cleanup update (`src/museum/artistName.ts`) re-points artworks to
+freshly-named artist rows. Remove the orphaned garbled ones ("? Thiery",
+"a painting", …) by running `museum-app/supabase/cleanup-orphan-artists.sql`
+once in the Supabase SQL Editor after that ingest completes.
+
 ## Tuning (all optional, in `.env`)
 
 | Var | Default | Meaning |

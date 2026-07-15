@@ -33,6 +33,7 @@ import { parse } from "csv-parse";
 import type { Artwork, Artist } from "../types/domain.js";
 import type { CatalogData, MuseumSource } from "./source.js";
 import { inferCategory, inferEmpire } from "./taxonomy.js";
+import { cleanArtistName } from "./artistName.js";
 import {
   stripHtml,
   slugify,
@@ -542,7 +543,7 @@ export class MetSource implements MuseumSource {
   }
 
   private artistNameOf(record: MetObject): string {
-    return (record.artistDisplayName ?? "").trim() || "Unknown Artist";
+    return cleanArtistName(record.artistDisplayName) ?? "Unknown Artist";
   }
 
   private artistIdOf(name: string): string {
