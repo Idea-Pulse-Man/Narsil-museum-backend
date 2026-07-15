@@ -200,6 +200,48 @@ export const env = {
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
   },
 
+  /**
+   * Canvas checkout (Stripe payment → Printful fulfillment).
+   * The frontend never talks to Stripe's secret API or Printful directly:
+   * it asks this backend for a PaymentIntent, pays with Stripe.js, and the
+   * backend submits the Printful order once the payment has succeeded.
+   */
+  stripe: {
+    /** Secret key (sk_test_… / sk_live_…). Checkout routes 503 while unset. */
+    secretKey: process.env.STRIPE_SECRET_KEY ?? "",
+    /** Signing secret (whsec_…) for the /api/stripe/webhook endpoint. */
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
+  },
+
+  printful: {
+    /** Private API token (https://developers.printful.com). */
+    apiKey: process.env.PRINTFUL_API_KEY ?? "",
+    /** Store id — required when the token has access to multiple stores. */
+    storeId: process.env.PRINTFUL_STORE_ID ?? "",
+    /**
+     * Submit orders for fulfillment immediately ("true") or create drafts to
+     * confirm by hand in the Printful dashboard (default — safe for dev).
+     */
+    confirmOrders: process.env.PRINTFUL_CONFIRM_ORDERS === "true",
+    /** Printful catalog product used for canvas prints (3 = Canvas (in)). */
+    canvasProductId: num(process.env.PRINTFUL_CANVAS_PRODUCT_ID, 3),
+    /**
+     * Optional explicit catalog variant ids per app size. When unset, the
+     * variant is discovered from the Printful catalog by matching the size
+     * dimensions (12×16 / 18×24 / 24×36 inches).
+     */
+    variantIds: {
+      Small: num(process.env.PRINTFUL_VARIANT_SMALL, 0) || null,
+      Medium: num(process.env.PRINTFUL_VARIANT_MEDIUM, 0) || null,
+      Large: num(process.env.PRINTFUL_VARIANT_LARGE, 0) || null,
+    } as Record<"Small" | "Medium" | "Large", number | null>,
+  },
+
+  checkout: {
+    /** ISO currency the canvas prices are charged in. */
+    currency: (process.env.CHECKOUT_CURRENCY ?? "usd").toLowerCase(),
+  },
+
   flickr: {
     /** Free API key (https://www.flickr.com/services/api/keys/). While unset,
      *  the "flickr" source is skipped with a notice instead of failing. */

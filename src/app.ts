@@ -5,6 +5,7 @@ import cors from "cors";
 import { env } from "./config/env.js";
 import { CatalogService } from "./museum/catalog.js";
 import { apiRoutes } from "./routes/index.js";
+import { stripeWebhookHandler } from "./routes/stripeWebhook.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
@@ -43,6 +44,14 @@ export function createApp(catalog: CatalogService = new CatalogService(env)): Ex
       methods: ["GET", "POST"],
     }),
   );
+  // Stripe webhook needs the RAW body for signature verification, so it is
+  // mounted before express.json() consumes the stream.
+  app.post(
+    "/api/stripe/webhook",
+    express.raw({ type: "application/json" }),
+    stripeWebhookHandler(catalog),
+  );
+
   app.use(express.json());
 
   // Local dev: serve public/index.html from project root.

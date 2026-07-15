@@ -4,6 +4,7 @@ import { artworkRoutes } from "./artworks.js";
 import { artistRoutes } from "./artists.js";
 import { artistPhotoRoutes } from "./artistPhoto.js";
 import { imageRoutes } from "./image.js";
+import { checkoutRoutes } from "./checkout.js";
 
 /** Mounts all `/api/*` routes onto a single router. */
 export function apiRoutes(catalog: CatalogService): Router {
@@ -23,6 +24,7 @@ export function apiRoutes(catalog: CatalogService): Router {
   router.use("/artists", artistRoutes(catalog));
   router.use("/artist-photo", artistPhotoRoutes());
   router.use("/image", imageRoutes(catalog.iiif));
+  router.use("/checkout", checkoutRoutes(catalog));
 
   return router;
 }
