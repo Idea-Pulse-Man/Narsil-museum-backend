@@ -16,6 +16,7 @@
     "ingest": "tsx src/ingest/run.ts",
     "ingest:prod": "node dist/src/ingest/run.js",
     "backfill:descriptions": "tsx src/ingest/backfillDescriptions.ts",
+    "backfill:descriptions:prod": "node dist/src/ingest/backfillDescriptions.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
