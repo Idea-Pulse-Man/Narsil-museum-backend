@@ -1,7 +1,10 @@
 node_modules/
 dist/
+# Never commit env files or their backups (they hold real secrets).
+# `.env.example` stays tracked — gitignore has no effect on already-tracked files.
 .env
-.env.local
+.env.*
+*.bak
 *.log
 npm-debug.log*
 .DS_Store
