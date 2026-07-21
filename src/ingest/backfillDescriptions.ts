@@ -235,31 +235,48 @@ async function main(): Promise<void> {
 
   let generated = 0;
   let failed = 0;
+  let processed = 0;
+  const startedAt = Date.now();
+  const heartbeat = (): void => {
+    processed++;
+    if (processed % 50 !== 0) return;
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const rate = processed / elapsed; // works per second
+    const etaMin = Math.round((candidates.length - processed) / rate / 60);
+    console.log(
+      `     ${processed}/${candidates.length} done ` +
+        `(generated=${generated} failed=${failed}) — ~${etaMin} min left`,
+    );
+  };
   await mapLimit(candidates, AI_CONCURRENCY, async (art) => {
-    const text = await generateAiDescription({
-      title: art.title,
-      artist: artistName.get(art.artist_id) ?? "Unknown Artist",
-      medium: art.medium ?? "",
-      year: art.year ?? "",
-      museum: museumOf(art),
-      tags: (art.tags ?? []).slice(0, 6),
-      sourceText: art.description ?? undefined,
-    });
-    if (!text) {
-      failed++;
-      return;
+    try {
+      const text = await generateAiDescription({
+        title: art.title,
+        artist: artistName.get(art.artist_id) ?? "Unknown Artist",
+        medium: art.medium ?? "",
+        year: art.year ?? "",
+        museum: museumOf(art),
+        tags: (art.tags ?? []).slice(0, 6),
+        sourceText: art.description ?? undefined,
+      });
+      if (!text) {
+        failed++;
+        return;
+      }
+      const { error } = await client
+        .from("artworks")
+        .update({ ai_description: text })
+        .eq("id", art.id);
+      if (error) {
+        failed++;
+        console.warn(`  ✗ artwork ${art.id}: ${error.message}`);
+        return;
+      }
+      generated++;
+      if (generated <= 5) console.log(`       ${art.id}: "${text}"`);
+    } finally {
+      heartbeat();
     }
-    const { error } = await client
-      .from("artworks")
-      .update({ ai_description: text })
-      .eq("id", art.id);
-    if (error) {
-      failed++;
-      console.warn(`  ✗ artwork ${art.id}: ${error.message}`);
-      return;
-    }
-    generated++;
-    if (generated <= 5) console.log(`       ${art.id}: "${text}"`);
   });
 
   console.log(`Done — generated=${generated} failed=${failed}.`);
