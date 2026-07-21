@@ -101,15 +101,30 @@ export const SOURCE_DEFAULTS = {
  *
  * `MUSEUM_SOURCES` (comma list) is read first; `MUSEUM_SOURCE` (singular) is
  * kept as a back-compat alias when `MUSEUM_SOURCES` is unset, so existing
- * single-source deploys don't break silently.
+ * single-source deploys don't break silently. Names that aren't in
+ * KNOWN_MUSEUM_SOURCES are dropped with a warning — a silent drop costs a whole
+ * ingest run before anyone notices the typo.
  */
 function parseMuseumSources(): MuseumSourceId[] {
   const raw = process.env.MUSEUM_SOURCES ?? process.env.MUSEUM_SOURCE;
-  const items = list(raw, ["wellcome"]).filter(
-    (s): s is MuseumSourceId =>
-      (KNOWN_MUSEUM_SOURCES as readonly string[]).includes(s),
-  );
-  return items.length > 0 ? items : ["wellcome"];
+  const requested = list(raw, ["wellcome"]);
+  const known = new Set<string>(KNOWN_MUSEUM_SOURCES);
+  const items = requested.filter((s): s is MuseumSourceId => known.has(s));
+
+  const unknown = requested.filter((s) => !known.has(s));
+  if (unknown.length > 0) {
+    console.warn(
+      `MUSEUM_SOURCES: ignoring unknown source${unknown.length > 1 ? "s" : ""}` +
+        ` ${unknown.join(", ")} — known: ${KNOWN_MUSEUM_SOURCES.join(", ")}`,
+    );
+  }
+  if (items.length === 0) {
+    console.warn(
+      'MUSEUM_SOURCES: no valid source listed — falling back to "wellcome".',
+    );
+    return ["wellcome"];
+  }
+  return items;
 }
 
 const museumSources = parseMuseumSources();
@@ -246,6 +261,18 @@ export const env = {
   checkout: {
     /** ISO currency the canvas prices are charged in. */
     currency: (process.env.CHECKOUT_CURRENCY ?? "usd").toLowerCase(),
+  },
+
+  /**
+   * AI placard descriptions (`npm run backfill:descriptions` + ingest).
+   * Only thin/boilerplate records are generated for — good museum prose is
+   * never rewritten. While the key is unset the whole tier silently no-ops
+   * and placards keep their deterministic wall text.
+   */
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY ?? "",
+    /** Chat model used for wall-text generation. */
+    model: process.env.OPENAI_MODEL ?? "gpt-5.5",
   },
 
   flickr: {

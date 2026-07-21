@@ -518,11 +518,12 @@ export class WellcomeSource implements MuseumSource {
   }
 
   /**
-   * Trim a long catalogue description down to a short, card-friendly blurb —
-   * some Wellcome descriptions run to well over a thousand characters. Prefer
-   * ending on a sentence boundary; otherwise cut on a word and add an ellipsis.
+   * Sanity-cap very long catalogue descriptions — some Wellcome records run to
+   * well over a thousand characters. Deliberately generous (the placard UI
+   * clamps with "Read more"); prefer ending on a sentence boundary, otherwise
+   * cut on a word and add an ellipsis.
    */
-  private concise(text: string, max = 240): string {
+  private concise(text: string, max = 900): string {
     const clean = text.replace(/\s+/g, " ").trim();
     if (clean.length <= max) return clean;
 

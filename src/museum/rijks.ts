@@ -34,6 +34,7 @@ import {
   hslToHex,
   hashString,
 } from "../utils/text.js";
+import { composeWallText } from "../utils/wallText.js";
 
 // ── Linked Art shapes (only the paths we walk) ──────────────────────────────
 
@@ -473,8 +474,12 @@ export class RijksSource implements MuseumSource {
     return m ? Number(m[1]) : null;
   }
 
-  /** Trim long gallery descriptions to a short, card-friendly blurb. */
-  private concise(text: string, max = 240): string {
+  /**
+   * Sanity-cap very long gallery descriptions. Deliberately generous (the
+   * placard UI clamps with "Read more") — a tight cap here used to cut real
+   * museum prose mid-sentence at ingest, losing the text permanently.
+   */
+  private concise(text: string, max = 900): string {
     const clean = text.replace(/\s+/g, " ").trim();
     if (clean.length <= max) return clean;
 
@@ -554,13 +559,13 @@ export class RijksSource implements MuseumSource {
       accent: this.accentFor(seed),
       description:
         work.description ||
-        [
-          work.artistName !== "Unknown Artist" ? work.artistName : "",
-          work.medium,
-          work.yearLabel !== "Date unknown" ? work.yearLabel : "",
-        ]
-          .filter(Boolean)
-          .join(" · ") ||
+        composeWallText({
+          artistName: work.artistName,
+          medium: work.medium,
+          typeLabel: work.typeLabel,
+          yearLabel: work.yearLabel,
+          museum: "The Rijksmuseum, Amsterdam",
+        }) ||
         `${work.title} from the collection of the Rijksmuseum, Amsterdam.`,
       tags: uniqueTags([work.typeLabel, ...work.techniques, ...work.materials]),
       category: inferCategory(signals),

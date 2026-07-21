@@ -15,6 +15,7 @@
     "start": "node dist/src/index.js",
     "ingest": "tsx src/ingest/run.ts",
     "ingest:prod": "node dist/src/ingest/run.js",
+    "backfill:descriptions": "tsx src/ingest/backfillDescriptions.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
