@@ -20,6 +20,49 @@ function getClient(): SupabaseClient | null {
   return client;
 }
 
+/**
+ * PostgREST caps every response at its `max-rows` setting (1000 on Supabase by
+ * default) and does it SILENTLY — a single `.range(0, 9999)` came back with
+ * exactly 1000 rows out of 5930, so five of every six ingested artworks never
+ * reached the app. Paging is the only way to read the whole table without
+ * depending on a dashboard setting.
+ */
+const PAGE_SIZE = 1000;
+/** Safety valve: stop rather than loop forever if paging ever misbehaves. */
+const MAX_ROWS = 200_000;
+
+interface PageResult {
+  data: unknown;
+  error: { message: string } | null;
+}
+
+/**
+ * Read a table in pages until it runs dry. The offset advances by the rows
+ * actually RECEIVED, not the page size asked for, so a server whose max-rows is
+ * smaller than PAGE_SIZE still pages correctly instead of stopping at the first
+ * short page. Callers must supply a stable `.order()`, or Postgres is free to
+ * return rows in an order that drops and repeats records across pages.
+ */
+export async function fetchAllPages<T>(
+  label: string,
+  page: (from: number, to: number) => PromiseLike<PageResult>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  let from = 0;
+  while (from < MAX_ROWS) {
+    const { data, error } = await page(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`Supabase ${label} fetch failed: ${error.message}`);
+    const batch = (data as T[] | null) ?? [];
+    if (batch.length === 0) break;
+    rows.push(...batch);
+    from += batch.length;
+  }
+  return rows;
+}
+
+const ARTWORK_COLUMNS =
+  "id, title, description, image_url, artist_id, year, period, medium, source, accent, tags, category, origin, empire";
+
 interface ArtworkRow {
   id: string;
   title: string;
@@ -63,9 +106,7 @@ export async function getArtworkFromSupabase(id: string): Promise<Artwork | null
 
   const { data, error } = await db
     .from("artworks")
-    .select(
-      "id, title, description, image_url, artist_id, year, period, medium, source, accent, tags, category, origin, empire",
-    )
+    .select(ARTWORK_COLUMNS)
     .eq("id", id)
     .maybeSingle();
 
@@ -82,16 +123,15 @@ export async function listArtworksFromSupabase(): Promise<Artwork[]> {
     );
   }
 
-  const { data, error } = await db
-    .from("artworks")
-    .select(
-      "id, title, description, image_url, artist_id, year, period, medium, source, accent, tags, category, origin, empire",
-    )
-    .not("image_url", "is", null)
-    .range(0, 9999);
-
-  if (error) throw new Error(`Supabase artworks fetch failed: ${error.message}`);
-  return (data as ArtworkRow[]).map(mapRow);
+  const rows = await fetchAllPages<ArtworkRow>("artworks", (from, to) =>
+    db
+      .from("artworks")
+      .select(ARTWORK_COLUMNS)
+      .not("image_url", "is", null)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  return rows.map(mapRow);
 }
 
 interface ArtistRow {
@@ -141,13 +181,14 @@ export async function listArtistsFromSupabase(): Promise<Artist[]> {
     );
   }
 
-  const { data, error } = await db
-    .from("artists")
-    .select(
-      "id, name, initials, profile_type, bio, avatar_url, lifespan, nationality, period, style, known_for, accent, followers, likes, saves",
-    )
-    .range(0, 9999);
-
-  if (error) throw new Error(`Supabase artists fetch failed: ${error.message}`);
-  return (data as ArtistRow[]).map(mapArtistRow);
+  const rows = await fetchAllPages<ArtistRow>("artists", (from, to) =>
+    db
+      .from("artists")
+      .select(
+        "id, name, initials, profile_type, bio, avatar_url, lifespan, nationality, period, style, known_for, accent, followers, likes, saves",
+      )
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  return rows.map(mapArtistRow);
 }
