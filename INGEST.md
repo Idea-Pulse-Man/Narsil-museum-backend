@@ -67,10 +67,12 @@ nano .env        # fill in the values below
 Set at least these in `.env`:
 
 ```ini
-MUSEUM_SOURCES=wellcome,met
-CATALOG_LIMIT=120
+MUSEUM_SOURCES=wellcome,met,cma,rijks
+CATALOG_LIMIT=50
 
-# The Met needs no API key (CC0, key-free).
+# The Met, Cleveland (cma) and Rijksmuseum (rijks) need no API key (CC0 /
+# public-domain, key-free). CATALOG_LIMIT is PER SOURCE — four sources at 50
+# ingest ~200 artworks per run (~125s).
 
 AWS_REGION=us-east-2
 S3_BUCKET=narsil-backend-images
@@ -83,6 +85,13 @@ SUPABASE_SERVICE_ROLE_KEY=<paste the service_role secret here>
 
 > AWS credentials are **not** needed here — the EC2 instance role
 > (`narsil-ec2-role`) supplies them automatically.
+
+> **Keep exactly one `MUSEUM_SOURCES` line.** dotenv lets the LAST duplicate key
+> in the file win, so a leftover `MUSEUM_SOURCES=` further down silently
+> overrides the one you just edited — `.env` reads correctly while the job
+> ingests something else. Verify with
+> `grep -n "^[^#]*MUSEUM_SOURCE" .env`; it must print a single line. The
+> `Ingest: sources=…` line at the top of every run is the ground truth.
 
 ## Run the Supabase migration (once)
 
@@ -100,7 +109,7 @@ Expected output ends with something like:
 
 ```
 4/4 Upserting into Supabase…
-Done in 42.3s — 240 artworks + NN artists live.
+Done in 125.3s — 200 artworks + 103 artists live.
 ```
 
 Verify:
@@ -118,13 +127,46 @@ crontab -e
 ```
 
 Add (runs every day at 03:00 server time; `bash -lc` loads your PATH so
-`node`/`npm` resolve):
+`node`/`npm` resolve). The `date -Is` stamp opens each run — without it the
+appended runs are indistinguishable and you cannot tell last night's output from
+last month's:
 
 ```cron
-0 3 * * * /bin/bash -lc 'cd /home/ubuntu/narsil-museum-backend && npm run ingest' >> /home/ubuntu/narsil-ingest.log 2>&1
+0 3 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) ===" && npm run ingest' >> ~/ingest-cron.log 2>&1
 ```
 
-Check the log after the next run: `tail -n 50 ~/narsil-ingest.log`.
+> Avoid `%` anywhere in a crontab command — cron turns it into a newline.
+> `date -Is` sidesteps that; `date +%F` would break the line.
+
+Check the log after the next run: `tail -n 50 ~/ingest-cron.log`.
+
+Confirm cron fired it at all (Ubuntu logs every invocation to syslog):
+
+```bash
+grep CRON /var/log/syslog | grep narsil
+```
+
+### Rotate the log (once)
+
+The cron line appends forever. Without rotation the file grows unbounded and old
+failures linger at the top looking current:
+
+```bash
+sudo tee /etc/logrotate.d/narsil-ingest > /dev/null <<'EOF'
+/home/ubuntu/ingest-cron.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+  su ubuntu ubuntu
+}
+EOF
+
+sudo logrotate -d /etc/logrotate.d/narsil-ingest   # dry run; drop -d to apply
+```
 
 ---
 
