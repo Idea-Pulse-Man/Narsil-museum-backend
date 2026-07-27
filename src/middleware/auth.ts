@@ -48,3 +48,49 @@ export async function requireUser(
     next(err);
   }
 }
+
+/**
+ * `requireUser` plus a `profiles.role = 'admin'` check. Mount it on admin-only
+ * routes; the role is read with the service-role client so RLS can't be used to
+ * spoof it, and `profiles.role` itself is only writable by the admin RPCs (see
+ * museum-app/supabase/admin-dashboard.sql).
+ */
+export async function requireAdmin(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  await requireUser(req, res, async (err?: unknown) => {
+    // requireUser either answered 401 itself (callback never runs) or handed us
+    // an error to propagate.
+    if (err) {
+      next(err);
+      return;
+    }
+    try {
+      const { id } = authedUser(req);
+      const { data, error } = await supabaseAdmin()
+        .from("profiles")
+        .select("role")
+        .eq("id", id)
+        .maybeSingle();
+      if (error) {
+        res.status(502).json({
+          error: "Bad Gateway",
+          message: `Could not verify admin access: ${error.message}`,
+        });
+        return;
+      }
+      if (data?.role !== "admin") {
+        res.status(403).json({
+          error: "Forbidden",
+          message: "Admin access required.",
+        });
+        return;
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+}

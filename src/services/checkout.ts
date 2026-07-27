@@ -221,10 +221,10 @@ async function loadOrder(orderId: string, userId?: string): Promise<OrderRow> {
   return data as OrderRow;
 }
 
-/** Read an order's fulfillment status (scoped to the owner). */
+/** Read an order's fulfillment status. Scoped to the owner unless omitted (admin). */
 export async function getOrderStatus(
   orderId: string,
-  userId: string,
+  userId?: string,
 ): Promise<OrderStatus> {
   return toStatus(await loadOrder(orderId, userId));
 }
