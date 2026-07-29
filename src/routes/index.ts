@@ -7,6 +7,8 @@ import { imageRoutes } from "./image.js";
 import { checkoutRoutes } from "./checkout.js";
 import { adminRoutes } from "./admin.js";
 import { printfulWebhookRoutes } from "./printfulWebhook.js";
+import { appleRoutes } from "./apple.js";
+import { meRoutes } from "./me.js";
 
 /** Mounts all `/api/*` routes onto a single router. */
 export function apiRoutes(catalog: CatalogService): Router {
@@ -29,6 +31,8 @@ export function apiRoutes(catalog: CatalogService): Router {
   router.use("/checkout", checkoutRoutes(catalog));
   router.use("/admin", adminRoutes(catalog));
   router.use("/printful", printfulWebhookRoutes());
+  router.use("/apple", appleRoutes());
+  router.use("/me", meRoutes());
 
   return router;
 }

@@ -33,6 +33,86 @@ export function extForType(type: string): string {
 }
 
 /**
+ * Width of the free-tier download. The paid tier gets the original.
+ *
+ * 2000px is a real photo — fine for a phone wallpaper, a social post or a
+ * 6×8" print — while leaving a visible gap to the master, which for most
+ * museum scans is 3000–6000px wide.
+ */
+export const STANDARD_DOWNLOAD_WIDTH = 2000;
+
+/** IIIF size segment in `{base}/{id}/{region}/{size}/{rotation}/{quality}.{fmt}`. */
+const IIIF_PATH = /\/full\/(max|full|\d+,|,\d+|!\d+,\d+|pct:[\d.]+)\/(\d+)\//;
+
+/**
+ * Resolve the image URL for a download at a given width.
+ *
+ * Every image family in the catalogue can be resized by URL alone, so neither
+ * tier costs us any image processing — the upstream does the work:
+ *
+ *   · our IIIF proxy      → `?w=` / `?full=1`   (routes/image.ts)
+ *   · a direct IIIF URL   → rewrite the size segment
+ *   · Wikimedia Commons   → `?width=`
+ *   · wsrv.nl             → `&w=`
+ *   · raw S3 / Flickr     → no width parameter of their own, so the standard
+ *                           tier is routed through wsrv.nl (already used by the
+ *                           frontend grid) and the paid tier gets the original
+ *
+ * `width = null` means "largest available".
+ */
+export function downloadImageUrl(
+  src: string,
+  publicBaseUrl: string,
+  width: number | null,
+): string {
+  if (!src) return src;
+
+  // Our own IIIF proxy — it already understands both tiers.
+  const proxyPath = src.startsWith("/api/")
+    ? `${publicBaseUrl.replace(/\/$/, "")}${src}`
+    : src;
+  if (proxyPath.includes("/api/image/")) {
+    const url = new URL(proxyPath);
+    url.searchParams.delete("w");
+    url.searchParams.delete("full");
+    if (width) url.searchParams.set("w", String(width));
+    else url.searchParams.set("full", "1");
+    return url.toString();
+  }
+
+  // wsrv.nl wrapper — unwrap first so the paid tier gets untouched bytes.
+  if (src.includes("wsrv.nl")) {
+    try {
+      const original = new URL(src).searchParams.get("url");
+      if (original) {
+        return downloadImageUrl(decodeURIComponent(original), publicBaseUrl, width);
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  // Wikimedia Commons — `Special:FilePath` serves the original with no width.
+  if (src.includes("commons.wikimedia.org/wiki/Special:FilePath")) {
+    const bare = src.replace(/([?&])width=\d+/g, "$1").replace(/[?&]$/, "");
+    if (!width) return bare;
+    return `${bare}${bare.includes("?") ? "&" : "?"}width=${width}`;
+  }
+
+  // A direct IIIF Image API URL — rewrite the size segment in place.
+  if (IIIF_PATH.test(src)) {
+    return src.replace(IIIF_PATH, (_m, _size, rotation) =>
+      width ? `/full/${width},/${rotation}/` : `/full/max/${rotation}/`,
+    );
+  }
+
+  // Raw S3 / Flickr CDN — no native resize. Full size is the original; the
+  // standard tier borrows wsrv.nl, which the frontend grid already relies on.
+  if (!width) return src;
+  return `https://wsrv.nl/?url=${encodeURIComponent(src)}&w=${width}&output=jpg&q=85`;
+}
+
+/**
  * Resolve the full-size image URL for download. Strips display-only transforms
  * (Wikimedia width, wsrv.nl thumbnails) so we fetch the original bytes.
  */

@@ -15,11 +15,18 @@ import type Stripe from "stripe";
 import { env } from "../config/env.js";
 import type { CatalogService } from "../museum/catalog.js";
 import { getArtworkFromSupabase } from "../museum/supabaseArtwork.js";
-import { fullResImageUrl } from "../utils/imageDownload.js";
+import { downloadImageUrl } from "../utils/imageDownload.js";
 import { HttpError } from "../utils/httpError.js";
 import { supabaseAdmin } from "./supabaseAdmin.js";
 import { getStripe } from "./stripe.js";
-import { isCanvasSize, priceForSize, type CanvasSize } from "./pricing.js";
+import {
+  isCanvasSize,
+  priceForSize,
+  subscriberPrice,
+  SUBSCRIBER_DISCOUNT_PCT,
+  type CanvasSize,
+} from "./pricing.js";
+import { isSubscriber } from "./subscriptions.js";
 import { buildRecipient, type AddressRow } from "./recipient.js";
 import { createPrintfulOrder, resolveVariantId } from "./printful.js";
 
@@ -39,7 +46,12 @@ export interface CheckoutIntent {
   clientSecret: string;
   amount: number;
   currency: string;
+  /** What the customer actually pays (discounted for Narsil Pro members). */
   price: number;
+  /** Undiscounted price, so the app can show the struck-through original. */
+  listPrice: number;
+  /** 20 for a Pro member, 0 otherwise — drives the checkout-bar discount line. */
+  discountPct: number;
 }
 
 interface OrderRow {
@@ -86,11 +98,17 @@ async function loadArtwork(catalog: CatalogService, artworkId: string) {
 /**
  * Revenue split for artist originals — mirrors the old client-side logic but
  * reads the artist's opt-in + share straight from Supabase.
+ *
+ * The artist's share is computed from `listPrice`, NOT from what the customer
+ * paid: a Narsil Pro discount is a promotion the platform chose to run, and
+ * artists never agreed to fund it. The whole discount therefore comes out of
+ * `platformCut`.
  */
 async function revenueSplit(
   origin: string,
   artistId: string,
-  price: number,
+  listPrice: number,
+  paidPrice: number,
 ): Promise<{ artistCut: number | null; platformCut: number | null }> {
   if (origin !== "artist-original") return { artistCut: null, platformCut: null };
   const { data } = await supabaseAdmin()
@@ -100,8 +118,18 @@ async function revenueSplit(
     .maybeSingle();
   if (!data?.sell_opt_in) return { artistCut: null, platformCut: null };
   const pct = (data.revenue_share_pct as number | null) ?? 30;
-  const artistCut = Math.round(price * (pct / 100) * 100) / 100;
-  const platformCut = Math.round((price - artistCut) * 100) / 100;
+  const artistCut = Math.round(listPrice * (pct / 100) * 100) / 100;
+  const platformCut = Math.round((paidPrice - artistCut) * 100) / 100;
+
+  // Only reachable with a revenue share above 80%, where the discount is wider
+  // than the platform's entire margin. The artist is still paid in full — the
+  // platform takes the loss — but this should never happen silently.
+  if (platformCut < 0) {
+    console.warn(
+      `[checkout] artist ${artistId} at ${pct}% leaves the platform ` +
+        `${platformCut} on a discounted order (list ${listPrice}, paid ${paidPrice}).`,
+    );
+  }
   return { artistCut, platformCut };
 }
 
@@ -132,10 +160,17 @@ export async function createCheckout(
   buildRecipient(address, user.email); // validate deliverability before paying
   await resolveVariantId(size); // validate the Printful variant exists
 
-  const price = priceForSize(artwork.id, size);
+  // Narsil Pro members pay 20% less. Entitlement is read server-side — the app
+  // is never asked whether its user is a subscriber.
+  const listPrice = priceForSize(artwork.id, size);
+  const pro = await isSubscriber(user.id);
+  const price = pro ? subscriberPrice(listPrice) : listPrice;
+  const discountPct = pro ? SUBSCRIBER_DISCOUNT_PCT : 0;
+
   const { artistCut, platformCut } = await revenueSplit(
     artwork.origin,
     artwork.artistId,
+    listPrice,
     price,
   );
 
@@ -146,6 +181,8 @@ export async function createCheckout(
       artwork_id: artwork.id,
       size,
       price,
+      list_price: listPrice,
+      discount_pct: discountPct,
       status: "pending_payment",
       address_id: address.id,
       currency: env.checkout.currency,
@@ -165,13 +202,17 @@ export async function createCheckout(
       amount,
       currency: env.checkout.currency,
       automatic_payment_methods: { enabled: true },
-      description: `Narsil canvas — ${artwork.title} (${size})`,
+      description:
+        `Narsil canvas — ${artwork.title} (${size})` +
+        (discountPct ? ` — Pro ${discountPct}% off` : ""),
       ...(user.email ? { receipt_email: user.email } : {}),
       metadata: {
         order_id: order.id,
         artwork_id: artwork.id,
         size,
         user_id: user.id,
+        list_price: String(listPrice),
+        discount_pct: String(discountPct),
       },
     });
   } catch (err) {
@@ -192,6 +233,8 @@ export async function createCheckout(
     amount,
     currency: env.checkout.currency,
     price,
+    listPrice,
+    discountPct,
   };
 }
 
@@ -288,7 +331,13 @@ export async function finalizeOrder(
     if (!artwork.image) {
       throw new HttpError(409, "This artwork has no print image.");
     }
-    const imageUrl = fullResImageUrl(artwork.image, env.publicBaseUrl);
+    // The print file must come from the museum master, not the 843px staged
+    // copy — a 24×36" canvas printed from 843px is roughly 24 DPI.
+    const imageUrl = downloadImageUrl(
+      artwork.sourceImage ?? artwork.image,
+      env.publicBaseUrl,
+      null,
+    );
 
     const printful = await createPrintfulOrder({
       externalId: order.id,

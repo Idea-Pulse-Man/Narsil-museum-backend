@@ -3,11 +3,14 @@ import type { CatalogService } from "../museum/catalog.js";
 import type { ListResponse, Artwork } from "../types/domain.js";
 import { getArtworkFromSupabase } from "../museum/supabaseArtwork.js";
 import { env } from "../config/env.js";
+import { maybeUser, optionalUser } from "../middleware/auth.js";
+import { isSubscriber } from "../services/subscriptions.js";
 import {
+  downloadImageUrl,
   extForType,
   fetchImageBytes,
-  fullResImageUrl,
   slugifyFilename,
+  STANDARD_DOWNLOAD_WIDTH,
 } from "../utils/imageDownload.js";
 
 /**
@@ -31,13 +34,19 @@ export function artworkRoutes(catalog: CatalogService): Router {
   });
 
   /**
-   * Stream the artwork image for download. Resolves the image from the in-memory
-   * catalog or Supabase, fetches it server-side (avoiding S3 CORS), and returns
-   * bytes with Content-Disposition so the browser saves a file.
+   * Stream the artwork image for download, in one of two tiers:
+   *
+   *   ?res=standard (default) — 2000px wide, free for everyone
+   *   ?res=high               — the museum's largest master, Narsil Pro only
+   *
+   * Both are genuinely different files: the museum image servers resize on
+   * request, so the free tier is a real downscale rather than the same bytes
+   * under another name. Entitlement is checked here, server-side.
    */
-  router.get("/:id/download", async (req, res, next) => {
+  router.get("/:id/download", optionalUser, async (req, res, next) => {
     try {
       const { id } = req.params;
+      const wantsHigh = req.query.res === "high";
       const artwork =
         (await catalog.getArtwork(id)) ?? (await getArtworkFromSupabase(id));
 
@@ -65,10 +74,31 @@ export function artworkRoutes(catalog: CatalogService): Router {
         return;
       }
 
-      const imageUrl = fullResImageUrl(artwork.image, env.publicBaseUrl);
+      if (wantsHigh) {
+        const user = maybeUser(req);
+        if (!user || !(await isSubscriber(user.id))) {
+          res.status(402).json({
+            error: "Payment Required",
+            message: "High-resolution downloads are a Narsil Pro feature.",
+          });
+          return;
+        }
+      }
+
+      // Resolve from the museum's own URL — `artwork.image` is the 843px staged
+      // copy, so serving it as "high resolution" would be a lie and asking
+      // wsrv.nl for 2000px would just upscale it.
+      const width = wantsHigh ? null : STANDARD_DOWNLOAD_WIDTH;
+      const imageUrl = downloadImageUrl(
+        artwork.sourceImage ?? artwork.image,
+        env.publicBaseUrl,
+        width,
+      );
       const { buffer, contentType } = await fetchImageBytes(imageUrl);
       const ext = extForType(contentType);
-      const filename = `${slugifyFilename(artwork.title)}.${ext}`;
+      const filename =
+        `${slugifyFilename(artwork.title)}` +
+        `${wantsHigh ? "-hires" : ""}.${ext}`;
 
       res.setHeader("Content-Type", contentType);
       res.setHeader("Content-Length", String(buffer.length));

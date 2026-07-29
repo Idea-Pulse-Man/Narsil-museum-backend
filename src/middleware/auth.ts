@@ -14,6 +14,46 @@ export function authedUser(req: Request): AuthedUser {
   return user;
 }
 
+/**
+ * Read the user on a route guarded by `optionalUser` — null when the caller is
+ * anonymous. Use `authedUser` instead on `requireUser` routes.
+ */
+export function maybeUser(req: Request): AuthedUser | null {
+  return (req as Request & { user?: AuthedUser }).user ?? null;
+}
+
+/**
+ * Resolve the user when a token is present, but let anonymous callers through.
+ *
+ * For routes that serve everyone and only vary what they return — the download
+ * endpoint gives a standard image to anyone and the high-resolution one to
+ * Narsil Pro members. A bad or expired token is treated as anonymous rather
+ * than as an error, so a stale session degrades to the free tier instead of
+ * breaking the download entirely.
+ */
+export async function optionalUser(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const header = req.headers.authorization ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    if (token) {
+      const { data } = await supabaseAdmin().auth.getUser(token);
+      if (data?.user) {
+        (req as Request & { user?: AuthedUser }).user = {
+          id: data.user.id,
+          email: data.user.email ?? undefined,
+        };
+      }
+    }
+  } catch {
+    // Anonymous — the route decides what an unauthenticated caller may have.
+  }
+  next();
+}
+
 export async function requireUser(
   req: Request,
   res: Response,

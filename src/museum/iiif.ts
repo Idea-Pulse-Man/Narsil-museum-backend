@@ -93,3 +93,50 @@ export class IiifImageService {
     return `${this.baseUrl}/${encodeURIComponent(identifier)}/info.json`;
   }
 }
+
+/** Trailing IIIF request segments: `/{region}/{size}/{rotation}/{quality}.{fmt}`. */
+const IIIF_REQUEST_TAIL =
+  /\/(full|square|\d+,\d+,\d+,\d+|pct:[\d.,]+)\/[^/]+\/[^/]+\/[^/]+\.(jpg|jpeg|png|webp|tif|tiff|gif)$/i;
+
+/**
+ * Derive the `info.json` URL from a fully-built IIIF image URL by stripping the
+ * request tail. Returns null when the URL isn't a IIIF image request — the Met,
+ * CMA and Flickr serve ready-made CDN URLs with no image API behind them.
+ */
+export function iiifInfoUrlFrom(imageUrl: string): string | null {
+  if (!imageUrl || !IIIF_REQUEST_TAIL.test(imageUrl)) return null;
+  return imageUrl.replace(IIIF_REQUEST_TAIL, "/info.json");
+}
+
+/**
+ * Ask a IIIF server for a master's true pixel dimensions.
+ *
+ * Used at ingest so the download sheet can show real numbers ("3,842 × 5,120")
+ * instead of claiming a resolution the scan may not have. Never throws — an
+ * unreachable or non-IIIF source simply yields null and the UI falls back to
+ * the unqualified "High Resolution" label.
+ */
+export async function fetchIiifDimensions(
+  imageUrl: string,
+  timeoutMs = 10_000,
+): Promise<{ width: number; height: number } | null> {
+  const infoUrl = iiifInfoUrlFrom(imageUrl);
+  if (!infoUrl) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(infoUrl, {
+      headers: { Accept: "application/ld+json,application/json" },
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const info = (await res.json()) as { width?: number; height?: number };
+    if (!info?.width || !info?.height) return null;
+    return { width: Number(info.width), height: Number(info.height) };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}

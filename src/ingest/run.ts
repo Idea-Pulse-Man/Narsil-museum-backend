@@ -16,7 +16,7 @@ import "dotenv/config";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { env, SOURCE_DEFAULTS } from "../config/env.js";
-import { IiifImageService } from "../museum/iiif.js";
+import { fetchIiifDimensions, IiifImageService } from "../museum/iiif.js";
 import { ImageResolver } from "../museum/imaging.js";
 import { ArticSource } from "../museum/artic.js";
 import { WellcomeSource } from "../museum/wellcome.js";
@@ -314,6 +314,32 @@ interface Stats {
   failed: number;
 }
 
+/**
+ * Attach the museum's own image URL (and its master dimensions where the source
+ * exposes them) to an artwork before it's staged to S3.
+ *
+ * `upstream` is the URL the ingest downloads from — for IIIF sources it already
+ * carries the ingest width in its size segment, but that segment is rewritten
+ * on demand (`utils/imageDownload.ts` → `downloadImageUrl`), so storing it is
+ * enough to reach both the 2000px download tier and the full master.
+ *
+ * Dimension lookup is best-effort and only possible for real IIIF servers; the
+ * Met, CMA and Flickr hand out plain CDN URLs with no image API behind them.
+ */
+async function withSourceImage(
+  art: Artwork,
+  upstream: string,
+): Promise<Artwork> {
+  const dimensions = await fetchIiifDimensions(upstream);
+  return {
+    ...art,
+    sourceImage: upstream,
+    ...(dimensions
+      ? { imageWidth: dimensions.width, imageHeight: dimensions.height }
+      : {}),
+  };
+}
+
 /** Ensure every artwork's image is in S3; rewrite `image` to the S3 URL. */
 async function stageImages(artworks: Artwork[], s3: S3ImageStore): Promise<{
   ready: Artwork[];
@@ -330,22 +356,28 @@ async function stageImages(artworks: Artwork[], s3: S3ImageStore): Promise<{
         stats.failed++;
         return null;
       }
+      // Keep the museum's own URL alongside the staged copy. The S3 image is
+      // ingested at INGEST_IMAGE_WIDTH (843px) — fine for the feed, useless for
+      // a 24×36" print or a high-resolution download — so everything that needs
+      // real resolution resolves from `sourceImage` instead.
+      const withSource = await withSourceImage(art, upstream);
+
       // Hotlinked sources (see HOTLINK_ID_PREFIXES): store the upstream URL
       // as-is — browsers can load it even though servers can't download it.
       if (isHotlinked(art.id)) {
         stats.skipped++;
-        return art;
+        return withSource;
       }
       const key = artworkKey(art.id);
       try {
         if (env.ingest.skipExisting && (await s3.exists(key))) {
           stats.skipped++;
-          return { ...art, image: s3.publicUrl(key) };
+          return { ...withSource, image: s3.publicUrl(key) };
         }
         const { buffer, contentType } = await download(upstream);
         const url = await s3.upload(key, buffer, contentType);
         stats.uploaded++;
-        return { ...art, image: url };
+        return { ...withSource, image: url };
       } catch (err) {
         stats.failed++;
         console.warn(

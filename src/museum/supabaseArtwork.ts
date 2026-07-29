@@ -61,13 +61,16 @@ export async function fetchAllPages<T>(
 }
 
 const ARTWORK_COLUMNS =
-  "id, title, description, image_url, artist_id, year, period, medium, source, accent, tags, category, origin, empire";
+  "id, title, description, image_url, source_image_url, image_width, image_height, artist_id, year, period, medium, source, accent, tags, category, origin, empire";
 
 interface ArtworkRow {
   id: string;
   title: string;
   description: string | null;
   image_url: string | null;
+  source_image_url: string | null;
+  image_width: number | null;
+  image_height: number | null;
   artist_id: string | null;
   year: string | null;
   period: string | null;
@@ -90,6 +93,9 @@ function mapRow(row: ArtworkRow): Artwork {
     medium: row.medium ?? "—",
     source: row.source ?? "—",
     image: row.image_url ?? "",
+    ...(row.source_image_url ? { sourceImage: row.source_image_url } : {}),
+    ...(row.image_width ? { imageWidth: row.image_width } : {}),
+    ...(row.image_height ? { imageHeight: row.image_height } : {}),
     accent: row.accent ?? "#2a2a2a",
     description: row.description ?? "",
     tags: row.tags ?? [],

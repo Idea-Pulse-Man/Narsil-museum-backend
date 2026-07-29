@@ -61,6 +61,11 @@ export class SupabaseCatalogStore {
       title: a.title,
       description: a.description,
       image_url: a.image,
+      // The museum's own URL, kept so print files and high-resolution
+      // downloads never have to settle for the 843px staged copy.
+      source_image_url: a.sourceImage ?? null,
+      image_width: a.imageWidth ?? null,
+      image_height: a.imageHeight ?? null,
       artist_id: a.artistId,
       category: a.category,
       origin: a.origin,

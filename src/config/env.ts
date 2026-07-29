@@ -264,6 +264,52 @@ export const env = {
   },
 
   /**
+   * Narsil Pro — the Apple auto-renewing subscription (iOS only).
+   *
+   * The app buys through StoreKit and hands the signed transaction to
+   * POST /api/apple/verify; Apple pushes lifecycle changes to
+   * POST /api/apple/notifications. Both verify signatures against Apple's root
+   * CAs before anything is written, so every credential below is required for
+   * the tier to run. While ANY of them is unset the whole subscription tier
+   * no-ops: nobody is a subscriber, canvas checkout and free downloads are
+   * unaffected (same kill-switch convention as the AI description tier).
+   */
+  apple: {
+    /**
+     * App Store Connect API private key — the contents of the .p8 file, PEM
+     * included. Newlines may be escaped as \n for single-line env storage.
+     */
+    privateKey: (process.env.APPLE_PRIVATE_KEY ?? "").replace(/\\n/g, "\n"),
+    /** Key ID of that .p8 (App Store Connect → Users and Access → Keys). */
+    keyId: process.env.APPLE_KEY_ID ?? "",
+    /** Issuer ID from the same page (a UUID, shared by all your keys). */
+    issuerId: process.env.APPLE_ISSUER_ID ?? "",
+    /** Must match the app's bundle id exactly or signature checks fail. */
+    bundleId: process.env.APPLE_BUNDLE_ID ?? "com.narsil.museum",
+    /** Numeric App ID from App Store Connect (App Information → Apple ID). */
+    appAppleId: num(process.env.APPLE_APP_APPLE_ID, 0) || null,
+    /**
+     * Which App Store environment this deployment talks to. Sandbox for TestFlight
+     * and simulator builds, Production for the live app. A Sandbox transaction
+     * verified against Production (or vice versa) is rejected.
+     */
+    environment: (process.env.APPLE_ENVIRONMENT === "Sandbox"
+      ? "Sandbox"
+      : "Production") as "Production" | "Sandbox",
+    /**
+     * Directory holding Apple's root CA certificates (.cer, DER) used to verify
+     * signed payloads. Download from https://www.apple.com/certificateauthority/
+     * — "Apple Root CA - G3" is the one that signs App Store data.
+     */
+    rootCaDir: process.env.APPLE_ROOT_CA_DIR ?? "certs/apple",
+    /** Product ids of the subscription, for sanity-checking transactions. */
+    productIds: list(process.env.APPLE_PRODUCT_IDS, [
+      "com.narsil.museum.pro.monthly",
+      "com.narsil.museum.pro.annual",
+    ]),
+  },
+
+  /**
    * AI placard descriptions (`npm run backfill:descriptions` + ingest).
    * Only thin/boilerplate records are generated for — good museum prose is
    * never rewritten. While the key is unset the whole tier silently no-ops
