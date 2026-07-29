@@ -1,0 +1,28 @@
+# Pin what gets STORED in the repository to LF, regardless of each machine's
+# core.autocrlf setting. Checkout is unaffected — a Windows working copy still
+# gets CRLF — so this changes nothing day to day. What it prevents is a
+# contributor with autocrlf=false committing CRLF and turning the next diff
+# into a whole-file rewrite that buries the real change.
+* text=auto
+
+# Must be LF wherever they are checked out: CRLF breaks a shebang, and an
+# Apple .p8 signing key with CRLF fails PEM parsing outright.
+*.sh   text eol=lf
+*.p8   text eol=lf
+
+# Apple root CA certificates are DER — treating them as text corrupts them and
+# every signature check then fails for a reason nothing explains.
+*.cer  binary
+*.der  binary
+
+# Never normalise.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+
+# Generated — keep them out of diffs and out of language statistics.
+package-lock.json  linguist-generated=true -diff
+dist/**            linguist-generated=true
