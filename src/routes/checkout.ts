@@ -11,7 +11,7 @@
  */
 import { Router } from "express";
 import type { CatalogService } from "../museum/catalog.js";
-import { authedUser, requireUser } from "../middleware/auth.js";
+import { authedUser, requireUserFor } from "../middleware/auth.js";
 import {
   createCheckout,
   finalizeOrder,
@@ -20,7 +20,7 @@ import {
 
 export function checkoutRoutes(catalog: CatalogService): Router {
   const router = Router();
-  router.use(requireUser);
+  router.use(requireUserFor("Sign in to order a canvas."));
 
   router.post("/payment-intent", async (req, res, next) => {
     try {

@@ -9,12 +9,12 @@
  * that has been told "you are Pro" is not evidence that it is.
  */
 import { Router } from "express";
-import { authedUser, requireUser } from "../middleware/auth.js";
+import { authedUser, requireUserFor } from "../middleware/auth.js";
 import { getSubscription } from "../services/subscriptions.js";
 
 export function meRoutes(): Router {
   const router = Router();
-  router.use(requireUser);
+  router.use(requireUserFor("Sign in to see your subscription."));
 
   router.get("/subscription", async (req, res, next) => {
     try {

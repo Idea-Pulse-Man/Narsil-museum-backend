@@ -13,7 +13,7 @@
  * and Sandbox environments, or TestFlight lifecycle events never arrive.
  */
 import { Router } from "express";
-import { authedUser, requireUser } from "../middleware/auth.js";
+import { authedUser, requireUserFor } from "../middleware/auth.js";
 import {
   appleConfigured,
   resolveEntitlement,
@@ -29,7 +29,11 @@ import {
 export function appleRoutes(): Router {
   const router = Router();
 
-  router.post("/verify", requireUser, async (req, res, next) => {
+  const requireMember = requireUserFor(
+    "Create an account so your subscription is saved.",
+  );
+
+  router.post("/verify", requireMember, async (req, res, next) => {
     try {
       if (!appleConfigured()) {
         res.status(503).json({

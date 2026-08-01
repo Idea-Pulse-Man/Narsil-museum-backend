@@ -54,24 +54,27 @@ export async function optionalUser(
   next();
 }
 
-export async function requireUser(
+/** Shown when no token was sent and the route didn't say what it's for. */
+const DEFAULT_SIGN_IN_MESSAGE = "Sign in to continue.";
+
+async function authenticate(
   req: Request,
   res: Response,
   next: NextFunction,
+  signInMessage: string,
 ): Promise<void> {
   try {
     const header = req.headers.authorization ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
     if (!token) {
-      res.status(401).json({
-        error: "Unauthorized",
-        message: "Sign in to order a canvas.",
-      });
+      res.status(401).json({ error: "Unauthorized", message: signInMessage });
       return;
     }
 
     const { data, error } = await supabaseAdmin().auth.getUser(token);
     if (error || !data.user) {
+      // An expired session reads the same whatever the route was for, so this
+      // one stays generic.
       res.status(401).json({
         error: "Unauthorized",
         message: "Your session has expired — sign in again.",
@@ -87,6 +90,26 @@ export async function requireUser(
   } catch (err) {
     next(err);
   }
+}
+
+/**
+ * `requireUser` with route-specific copy for the signed-out case.
+ *
+ * The app surfaces these messages directly in toasts, so a single hardcoded
+ * string means someone tapping a high-resolution download gets told to sign in
+ * "to order a canvas". Pass what the caller was actually trying to do.
+ */
+export function requireUserFor(signInMessage: string) {
+  return (req: Request, res: Response, next: NextFunction): Promise<void> =>
+    authenticate(req, res, next, signInMessage);
+}
+
+export async function requireUser(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  return authenticate(req, res, next, DEFAULT_SIGN_IN_MESSAGE);
 }
 
 /**
