@@ -1,0 +1,18 @@
+{
+  "CORSRules": [
+    {
+      "AllowedHeaders": ["*"],
+      "AllowedMethods": ["GET", "HEAD"],
+      "AllowedOrigins": [
+        "capacitor://localhost",
+        "https://localhost",
+        "http://localhost",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://narsil-app-frontend.vercel.app"
+      ],
+      "ExposeHeaders": ["ETag", "Content-Length", "Content-Type"],
+      "MaxAgeSeconds": 86400
+    }
+  ]
+}

@@ -120,6 +120,25 @@ Verify:
 - Open one of those URLs in a browser — the image should load.
 - Open the app — the feed/search/discover screens show the museum art.
 
+## S3 CORS (Capacitor / Vercel)
+
+The iOS app (WKWebView) and the Vercel site `fetch` feed images for the Cache
+API. `<img>` works without CORS; those fetches need
+`Access-Control-Allow-Origin` on the bucket.
+
+Apply the policy in `s3-cors.json` (from a machine with AWS CLI + rights on
+`narsil-backend-images`):
+
+```bash
+aws s3api put-bucket-cors \
+  --bucket narsil-backend-images \
+  --cors-configuration file://s3-cors.json
+```
+
+Or paste the same `CORSRules` into S3 → bucket → Permissions → CORS. Add any
+extra Vercel preview origins you use. The app also caches via wsrv.nl when S3
+CORS is missing, so display still works either way.
+
 ## Schedule it daily (cron)
 
 ```bash
