@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { CatalogService } from "../museum/catalog.js";
 import type { ListResponse, Artwork } from "../types/domain.js";
 import { getArtworkFromSupabase } from "../museum/supabaseArtwork.js";
@@ -8,7 +10,7 @@ import { isSubscriber } from "../services/subscriptions.js";
 import {
   downloadImageUrl,
   extForType,
-  fetchImageBytes,
+  openImageResponse,
   slugifyFilename,
   STANDARD_DOWNLOAD_WIDTH,
 } from "../utils/imageDownload.js";
@@ -42,6 +44,9 @@ export function artworkRoutes(catalog: CatalogService): Router {
    * Both are genuinely different files: the museum image servers resize on
    * request, so the free tier is a real downscale rather than the same bytes
    * under another name. Entitlement is checked here, server-side.
+   *
+   * Bytes are piped through (not buffered) so large masters don't sit in
+   * process memory twice and time-to-first-byte stays snappy.
    */
   router.get("/:id/download", optionalUser, async (req, res, next) => {
     try {
@@ -94,22 +99,35 @@ export function artworkRoutes(catalog: CatalogService): Router {
         env.publicBaseUrl,
         width,
       );
-      const { buffer, contentType } = await fetchImageBytes(imageUrl);
+      // High-res masters can be slow to open; standard is usually quick.
+      const { response, contentType } = await openImageResponse(
+        imageUrl,
+        wantsHigh ? 120_000 : 45_000,
+      );
       const ext = extForType(contentType);
       const filename =
         `${slugifyFilename(artwork.title)}` +
         `${wantsHigh ? "-hires" : ""}.${ext}`;
 
       res.setHeader("Content-Type", contentType);
-      res.setHeader("Content-Length", String(buffer.length));
+      const len = response.headers.get("content-length");
+      if (len) res.setHeader("Content-Length", len);
       res.setHeader("Cache-Control", "private, max-age=3600");
       res.setHeader(
         "Content-Disposition",
         `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
       );
-      res.end(buffer);
+
+      // Node fetch body → Express response without buffering the whole file.
+      await pipeline(
+        Readable.fromWeb(
+          response.body as import("node:stream/web").ReadableStream,
+        ),
+        res,
+      );
     } catch (err) {
-      next(err);
+      if (!res.headersSent) next(err);
+      else res.destroy(err instanceof Error ? err : undefined);
     }
   });
 

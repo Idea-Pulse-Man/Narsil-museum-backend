@@ -144,9 +144,29 @@ export function fullResImageUrl(src: string, publicBaseUrl: string): string {
 /** Fetch image bytes server-side (no browser CORS restrictions). */
 export async function fetchImageBytes(
   imageUrl: string,
+  timeoutMs = 20_000,
 ): Promise<{ buffer: Buffer; contentType: string }> {
+  const { response, contentType } = await openImageResponse(imageUrl, timeoutMs);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length === 0) {
+    throw new Error("Image fetch returned an empty body");
+  }
+  return { buffer, contentType };
+}
+
+/**
+ * Open an upstream image response for streaming through to the client.
+ * Does not buffer the body — callers should pipe `response.body`.
+ *
+ * `timeoutMs` only covers time-to-first-byte (headers). Once streaming starts,
+ * large masters can take longer without being aborted.
+ */
+export async function openImageResponse(
+  imageUrl: string,
+  timeoutMs = 90_000,
+): Promise<{ response: Response; contentType: string }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(imageUrl, {
@@ -160,14 +180,12 @@ export async function fetchImageBytes(
     if (!res.ok) {
       throw new Error(`Image fetch failed: HTTP ${res.status}`);
     }
-
-    const buffer = Buffer.from(await res.arrayBuffer());
-    if (buffer.length === 0) {
-      throw new Error("Image fetch returned an empty body");
+    if (!res.body) {
+      throw new Error("Image fetch returned no body");
     }
 
     return {
-      buffer,
+      response: res,
       contentType: res.headers.get("content-type") ?? "image/jpeg",
     };
   } finally {
