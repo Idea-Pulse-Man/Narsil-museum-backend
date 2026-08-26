@@ -11,9 +11,13 @@ The Met (Open Access) API  ──►  download image URL     ──►  S3 (publ
 Cleveland (Open Access)    ──►  download CDN image     ──►  S3 (public)  ─┤
 Rijksmuseum Data Services  ──►  download IIIF image    ──►  S3 (public)  ─┼─►  Supabase rows  ──►  app
 Flickr Commons (LoC + BL)  ──►  download CDN image     ──►  S3 (public)  ─┤
-Art Institute of Chicago   ──►  (image HOTLINKED — metadata only)        ─┤
-Wikidata (artist name)     ──►  download portrait image ──► S3 (public)  ─┘
+Art Institute of Chicago   ──►  (image HOTLINKED — metadata only)        ─┘
 ```
+
+A **second daily cron** (`npm run ingest:artists`) builds For You artist
+profiles from **museum / IIIF catalog data only** (no Wikipedia): real person
+photo on the artist row + museum bio + collection titles. Only artists with
+`profile_ready = true` appear as story cards.
 
 All listed sources are pulled in the **same** daily run (e.g.
 `MUSEUM_SOURCES=wellcome,met,cma,rijks`) and merged before staging — every run
@@ -28,10 +32,9 @@ key-free, built on the new `data.rijksmuseum.nl` Data Services — not the
 deprecated legacy API) ingests **only** works whose image carries a Creative
 Commons public-domain mark, so the same applies.
 
-Artist portraits are resolved server-side (Wikidata) during the job, downloaded,
-and stored in S3 too (`artworks/artists/…`). Their URL is saved to
-`artists.avatar_url`, so the app shows portraits **with no live backend** — the
-old Vercel `/api/artist-photo` endpoint is no longer used by the client.
+Artist portraits from Wikidata are **not** used. For You artist cards are built
+by `npm run ingest:artists` from museum/IIIF catalog fields only (`avatar_url`,
+museum bio, collection works).
 
 > **Source note:** use any mix of `wellcome`, `met`, `cma`, `rijks`, `flickr`,
 > `artic`.
@@ -93,11 +96,14 @@ SUPABASE_SERVICE_ROLE_KEY=<paste the service_role secret here>
 > `grep -n "^[^#]*MUSEUM_SOURCE" .env`; it must print a single line. The
 > `Ingest: sources=…` line at the top of every run is the ground truth.
 
-## Run the Supabase migration (once)
+## Run the Supabase migrations (once)
 
-In the Supabase dashboard → **SQL Editor** → run the contents of
-`museum-app/supabase/catalog-columns.sql` (adds the catalog columns). Safe to
-re-run.
+In the Supabase dashboard → **SQL Editor** → run:
+
+1. `museum-app/supabase/catalog-columns.sql` (catalog fields)
+2. `museum-app/supabase/artist-wiki-columns.sql` (famous works + `profile_ready`)
+
+Both are safe to re-run.
 
 ## First run (manual)
 
@@ -152,12 +158,62 @@ last month's:
 
 ```cron
 0 3 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) ===" && npm run ingest' >> ~/ingest-cron.log 2>&1
+30 4 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) artist-profiles ===" && npm run ingest:artists:prod' >> ~/artist-profiles-cron.log 2>&1
 ```
 
 > Avoid `%` anywhere in a crontab command — cron turns it into a newline.
 > `date -Is` sidesteps that; `date +%F` would break the line.
 
-Check the log after the next run: `tail -n 50 ~/ingest-cron.log`.
+### Artist profile cron (For You story cards)
+
+Artwork ingest (IIIF / museum APIs) grows the catalog. The **artist profile**
+job builds cards from **museum data only — no Wikipedia / Wikidata**:
+
+```
+Museum / IIIF artworks in Supabase  ──►  collection titles + museum bio  ─┐
+Museum / catalog artist avatar_url  ──►  person photo (required)         ─┼─►  profile_ready
+```
+
+Rules:
+
+- **No museum person photograph → no card.**
+- **No rich museum bio → no card.**
+- Frontend only shows artist story slides when `profile_ready = true`.
+
+One-time SQL (Supabase → SQL Editor):
+
+```text
+museum-app/supabase/artist-wiki-columns.sql
+```
+
+Manual run on EC2:
+
+```bash
+cd ~/narsil-museum-backend
+npm run build
+npm run ingest:artists:prod -- --limit=40
+# dry-run:
+# npm run ingest:artists -- --dry-run --limit=10
+```
+
+Check the log: `tail -n 80 ~/artist-profiles-cron.log`.
+
+Rotate that log too:
+
+```bash
+sudo tee /etc/logrotate.d/narsil-artist-profiles > /dev/null <<'EOF'
+/home/ubuntu/artist-profiles-cron.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+  su ubuntu ubuntu
+}
+EOF
+```
 
 Confirm cron fired it at all (Ubuntu logs every invocation to syslog):
 
@@ -215,8 +271,8 @@ once in the Supabase SQL Editor after that ingest completes.
 | `INGEST_IMAGE_WIDTH` | 843 | Width (px) of the stored image |
 | `INGEST_SKIP_EXISTING` | true | Skip images already in S3 (set `false` to re-upload) |
 | `INGEST_CONCURRENCY` | 6 | Parallel downloads/uploads |
-| `INGEST_ARTIST_PHOTOS` | true | Resolve + store artist portraits in S3 (`false` to skip) |
-| `S3_ARTIST_PREFIX` | artworks/artists | Folder for portraits (kept public by the `artworks/*` policy) |
+| `S3_ARTIST_PREFIX` | artworks/artists | Legacy portrait folder (Wikidata portraits disabled) |
+| Artist profile cron | `npm run ingest:artists` | Museum/IIIF only → `profile_ready` |
 
 ### Rolling back to a single source
 

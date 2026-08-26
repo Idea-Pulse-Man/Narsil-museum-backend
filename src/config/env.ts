@@ -340,7 +340,8 @@ export const env = {
     /** Max concurrent image downloads/uploads. */
     concurrency: num(process.env.INGEST_CONCURRENCY, 6),
     /** Resolve artist portraits (Wikidata) and store them in S3. */
-    artistPhotos: process.env.INGEST_ARTIST_PHOTOS !== "false",
+    /** @deprecated Wikipedia/Wikidata portraits disabled — museum data only. */
+    artistPhotos: false,
   },
 } as const;
 

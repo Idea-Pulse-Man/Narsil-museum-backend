@@ -45,6 +45,14 @@ export class SupabaseCatalogStore {
       followers: a.followers,
       likes: a.likes,
       saves: a.saves,
+      ...(a.famousWorks ? { famous_works: a.famousWorks } : {}),
+      ...(a.wikidataQid
+        ? {
+            wikidata_qid: a.wikidataQid,
+            wiki_enriched_at: new Date().toISOString(),
+          }
+        : {}),
+      ...(a.wikipediaUrl ? { wikipedia_url: a.wikipediaUrl } : {}),
     }));
 
     for (const batch of chunk(rows, BATCH)) {

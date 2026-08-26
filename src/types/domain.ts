@@ -22,6 +22,15 @@ export interface Artist {
   saves: number;
   accent?: string;
   avatar?: string;
+  /** Famous work titles from Wikidata/Wikipedia (For You artist stories). */
+  famousWorks?: string[];
+  wikidataQid?: string;
+  wikipediaUrl?: string;
+  /**
+   * Set true by the artist-profile cron when a real person photo + detailed
+   * Wikipedia bio are stored. The app only shows artist story cards then.
+   */
+  profileReady?: boolean;
 }
 
 export type ArtworkOrigin = "public-domain" | "artist-original" | "fan-study";

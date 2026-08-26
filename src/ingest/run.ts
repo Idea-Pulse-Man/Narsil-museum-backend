@@ -28,10 +28,6 @@ import {
   DEFAULT_FLICKR_ACCOUNTS,
   type FlickrAccount,
 } from "../museum/flickr.js";
-import {
-  getArtistPhotoUrl,
-  isUnresolvablePortraitName,
-} from "../museum/artistPhoto.js";
 import type { MuseumSource } from "../museum/source.js";
 import type { Artwork, Artist } from "../types/domain.js";
 import { S3ImageStore } from "./s3.js";
@@ -40,11 +36,6 @@ import { SupabaseCatalogStore } from "./store.js";
 /** S3 object key for an artwork image, e.g. "artworks/wc-abc.jpg". */
 function artworkKey(id: string): string {
   return `${env.aws.s3Prefix}/${id}.jpg`;
-}
-
-/** S3 object key for an artist portrait, e.g. "artworks/artists/wc-x.jpg". */
-function artistKey(id: string): string {
-  return `${env.aws.s3ArtistPrefix}/${id}.jpg`;
 }
 
 // ── Resume cursor ───────────────────────────────────────────────────────────
@@ -99,17 +90,6 @@ const BROWSER_HEADERS: Record<string, string> = {
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-};
-
-/**
- * Wikimedia Commons requires a descriptive User-Agent identifying the bot and a
- * contact URL, and rate-limits hard (HTTP 429) otherwise. See
- * https://meta.wikimedia.org/wiki/User-Agent_policy
- */
-const WIKIMEDIA_HEADERS: Record<string, string> = {
-  "User-Agent":
-    "NarsilMuseumBot/1.0 (https://github.com/Idea-Pulse-Man/Narsil-museum-backend) ingestion",
-  Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
 };
 
 class RetryableError extends Error {
@@ -391,60 +371,6 @@ async function stageImages(artworks: Artwork[], s3: S3ImageStore): Promise<{
   return { ready: staged.filter((a): a is Artwork => a !== null), stats };
 }
 
-/**
- * Resolve each artist's portrait (Wikidata, server-side) and store it in S3,
- * setting `artist.avatar` to the public S3 URL. Artists with no resolvable
- * portrait (anonymous makers, workshops, etc.) are returned unchanged and fall
- * back to a monogram in the app. Never throws — a failed portrait is non-fatal.
- */
-async function stageArtistPhotos(
-  artists: Artist[],
-  s3: S3ImageStore,
-): Promise<{ artists: Artist[]; stats: Stats }> {
-  const stats: Stats = { uploaded: 0, skipped: 0, failed: 0 };
-
-  // Wikimedia rate-limits aggressively — keep portrait fetching gentle.
-  const portraitConcurrency = Math.min(2, env.ingest.concurrency);
-
-  const staged = await mapLimit(
-    artists,
-    portraitConcurrency,
-    async (artist): Promise<Artist> => {
-      // Anonymous/generic makers ("a Chinese artist", workshops, national
-      // schools) have no personal likeness — never attach a portrait, and don't
-      // let a previously-uploaded S3 object resurface via skipExisting below.
-      if (isUnresolvablePortraitName(artist.name)) {
-        stats.skipped++;
-        return { ...artist, avatar: undefined };
-      }
-      const key = artistKey(artist.id);
-      try {
-        if (env.ingest.skipExisting && (await s3.exists(key))) {
-          stats.skipped++;
-          return { ...artist, avatar: s3.publicUrl(key) };
-        }
-        const portraitUrl = await getArtistPhotoUrl(artist.name);
-        if (!portraitUrl) return artist; // no portrait → monogram
-        const { buffer, contentType } = await download(portraitUrl, {
-          headers: WIKIMEDIA_HEADERS,
-          retries: 4,
-        });
-        const url = await s3.upload(key, buffer, contentType);
-        stats.uploaded++;
-        return { ...artist, avatar: url };
-      } catch (err) {
-        stats.failed++;
-        console.warn(
-          `  ✗ artist ${artist.id}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        return artist;
-      }
-    },
-  );
-
-  return { artists: staged, stats };
-}
-
 async function main(): Promise<void> {
   const startedAt = Date.now();
   assertConfig();
@@ -477,20 +403,9 @@ async function main(): Promise<void> {
   );
 
   let finalArtists = artists;
-  if (env.ingest.artistPhotos) {
-    console.log("3/4 Resolving + uploading artist portraits to S3…");
-    const photos = await stageArtistPhotos(artists, s3);
-    finalArtists = photos.artists;
-    const withPhoto = finalArtists.filter((a) => a.avatar).length;
-    console.log(
-      `     uploaded=${photos.stats.uploaded} skipped=${photos.stats.skipped} ` +
-        `failed=${photos.stats.failed} (with portrait: ${withPhoto}/${finalArtists.length})`,
-    );
-  } else {
-    console.log("3/4 Artist portraits disabled (INGEST_ARTIST_PHOTOS=false).");
-  }
+  // Museum / IIIF only — For You artist cards come from `npm run ingest:artists`.
 
-  console.log("4/4 Upserting into Supabase…");
+  console.log("3/4 Upserting into Supabase…");
   await store.upsertArtists(finalArtists);
   await store.upsertArtworks(ready);
 

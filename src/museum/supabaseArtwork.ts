@@ -152,6 +152,8 @@ interface ArtistRow {
   period: string | null;
   style: string | null;
   known_for: string | null;
+  famous_works?: string[] | null;
+  profile_ready?: boolean | null;
   accent: string | null;
   followers: number | null;
   likes: number | null;
@@ -159,6 +161,9 @@ interface ArtistRow {
 }
 
 function mapArtistRow(row: ArtistRow): Artist {
+  const famousWorks = (row.famous_works ?? []).filter(
+    (w) => typeof w === "string" && w.trim().length > 0,
+  );
   return {
     id: row.id,
     name: row.name,
@@ -175,6 +180,8 @@ function mapArtistRow(row: ArtistRow): Artist {
     saves: row.saves ?? 0,
     accent: row.accent ?? undefined,
     avatar: row.avatar_url ?? undefined,
+    ...(famousWorks.length ? { famousWorks } : {}),
+    ...(row.profile_ready ? { profileReady: true } : {}),
   };
 }
 
@@ -191,7 +198,7 @@ export async function listArtistsFromSupabase(): Promise<Artist[]> {
     db
       .from("artists")
       .select(
-        "id, name, initials, profile_type, bio, avatar_url, lifespan, nationality, period, style, known_for, accent, followers, likes, saves",
+        "id, name, initials, profile_type, bio, avatar_url, lifespan, nationality, period, style, known_for, famous_works, accent, followers, likes, saves, profile_ready",
       )
       .order("id", { ascending: true })
       .range(from, to),

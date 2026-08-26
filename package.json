@@ -15,6 +15,8 @@
     "start": "node dist/src/index.js",
     "ingest": "tsx src/ingest/run.ts",
     "ingest:prod": "node dist/src/ingest/run.js",
+    "ingest:artists": "tsx src/ingest/artistProfiles.ts",
+    "ingest:artists:prod": "node dist/src/ingest/artistProfiles.js",
     "backfill:descriptions": "tsx src/ingest/backfillDescriptions.ts",
     "backfill:descriptions:prod": "node dist/src/ingest/backfillDescriptions.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
