@@ -17,7 +17,8 @@ Art Institute of Chicago   ──►  (image HOTLINKED — metadata only)       
 A **second daily cron** (`npm run ingest:artists -- --limit=50`) builds up to
 **50 ready** For You artist profiles per day. Museum / IIIF data is preferred;
 Wikipedia / Wikidata fills in only when the museum photo or bio is missing.
-Only artists with `profile_ready = true` appear as story cards.
+Only artists with an active row in `fyp_artist_cards` appear as story cards
+(the cron upserts this table when `profile_ready = true`).
 
 All listed sources are pulled in the **same** daily run (e.g.
 `MUSEUM_SOURCES=wellcome,met,cma,rijks`) and merged before staging — every run
@@ -102,6 +103,7 @@ In the Supabase dashboard → **SQL Editor** → run:
 
 1. `museum-app/supabase/catalog-columns.sql` (catalog fields)
 2. `museum-app/supabase/artist-wiki-columns.sql` (famous works + `profile_ready`)
+3. `museum-app/supabase/fyp-artist-cards.sql` (For You artist card table)
 
 Both are safe to re-run.
 
@@ -176,6 +178,7 @@ job then builds **up to 50 ready cards per day**:
 ```
 Museum / IIIF catalog first     ──►  bio + avatar when available     ─┐
 Wikipedia / Wikidata if needed  ──►  fill thin bio / missing photo   ─┼─►  profile_ready
+                                                                        └─►  fyp_artist_cards
 Collection titles from artworks ──►  "famous works" on the card      ─┘
 ```
 
@@ -193,7 +196,7 @@ Rules:
 
 - Museum data first; Wikipedia / Wikidata only when photo or bio is missing/thin.
 - Still **no card without a real person photograph**.
-- Frontend only shows artist story slides when `profile_ready = true`.
+- Frontend only shows artist story slides when a row exists in `fyp_artist_cards`.
 
 One-time SQL (Supabase → SQL Editor):
 

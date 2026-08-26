@@ -144,6 +144,73 @@ async function downloadPortrait(
   }
 }
 
+async function loadBackdropArtwork(
+  client: SupabaseClient,
+  artistId: string,
+): Promise<{ id: string; title: string; image_url: string } | null> {
+  const { data, error } = await client
+    .from("artworks")
+    .select("id, title, image_url")
+    .eq("artist_id", artistId)
+    .not("image_url", "is", null)
+    .or("hidden.is.null,hidden.eq.false")
+    .order("featured", { ascending: false })
+    .order("like_count", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data?.image_url) return null;
+  return {
+    id: String(data.id),
+    title: String(data.title ?? "").trim(),
+    image_url: String(data.image_url),
+  };
+}
+
+function famousForLine(
+  famousWorks: string[],
+  knownFor: string,
+): string | null {
+  if (famousWorks.length > 0) {
+    return famousWorks.slice(0, 3).join(" · ");
+  }
+  const known = knownFor.trim();
+  if (known && !/^Museum collection$/i.test(known)) return known;
+  return null;
+}
+
+async function upsertFypArtistCard(
+  client: SupabaseClient,
+  row: ArtistRow,
+  payload: {
+    avatar_url: string;
+    bio: string;
+    known_for: string;
+    famous_works: string[];
+  },
+  backdrop: { id: string; title: string; image_url: string } | null,
+): Promise<void> {
+  const cardPayload = {
+    artist_id: row.id,
+    name: row.name,
+    lifespan: row.lifespan,
+    nationality: row.nationality,
+    portrait_url: payload.avatar_url,
+    famous_for: famousForLine(payload.famous_works, payload.known_for),
+    bio: payload.bio,
+    backdrop_artwork_id: backdrop?.id ?? null,
+    backdrop_image_url: backdrop?.image_url ?? null,
+    backdrop_title: backdrop?.title || null,
+    active: true,
+    sort_order: 0,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await client
+    .from("fyp_artist_cards")
+    .upsert(cardPayload, { onConflict: "artist_id" });
+  if (error) throw new Error(`fyp_artist_cards: ${error.message}`);
+}
+
 async function loadCollectionWorks(
   client: SupabaseClient,
   artistId: string,
@@ -341,6 +408,9 @@ async function processArtist(
         .update(payload)
         .eq("id", row.id);
       if (error) throw new Error(error.message);
+
+      const backdrop = await loadBackdropArtwork(client, row.id);
+      await upsertFypArtistCard(client, row, payload, backdrop);
     }
 
     console.log(
