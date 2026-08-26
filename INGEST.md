@@ -14,10 +14,10 @@ Flickr Commons (LoC + BL)  ──►  download CDN image     ──►  S3 (publ
 Art Institute of Chicago   ──►  (image HOTLINKED — metadata only)        ─┘
 ```
 
-A **second daily cron** (`npm run ingest:artists`) builds For You artist
-profiles from **museum / IIIF catalog data only** (no Wikipedia): real person
-photo on the artist row + museum bio + collection titles. Only artists with
-`profile_ready = true` appear as story cards.
+A **second daily cron** (`npm run ingest:artists -- --limit=50`) builds up to
+**50 ready** For You artist profiles per day. Museum / IIIF data is preferred;
+Wikipedia / Wikidata fills in only when the museum photo or bio is missing.
+Only artists with `profile_ready = true` appear as story cards.
 
 All listed sources are pulled in the **same** daily run (e.g.
 `MUSEUM_SOURCES=wellcome,met,cma,rijks`) and merged before staging — every run
@@ -32,9 +32,9 @@ key-free, built on the new `data.rijksmuseum.nl` Data Services — not the
 deprecated legacy API) ingests **only** works whose image carries a Creative
 Commons public-domain mark, so the same applies.
 
-Artist portraits from Wikidata are **not** used. For You artist cards are built
-by `npm run ingest:artists` from museum/IIIF catalog fields only (`avatar_url`,
-museum bio, collection works).
+Artist portraits may be filled from Wikidata during the **artist profile** cron
+when the museum row has no `avatar_url`. Artwork ingest itself does not call
+Wikipedia.
 
 > **Source note:** use any mix of `wellcome`, `met`, `cma`, `rijks`, `flickr`,
 > `artic`.
@@ -158,26 +158,41 @@ last month's:
 
 ```cron
 0 3 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) ===" && npm run ingest' >> ~/ingest-cron.log 2>&1
-30 4 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) artist-profiles ===" && npm run ingest:artists:prod' >> ~/artist-profiles-cron.log 2>&1
+0 6 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) artist-profiles ===" && npm run ingest:artists:prod -- --limit=50' >> ~/artist-profiles-cron.log 2>&1
 ```
 
 > Avoid `%` anywhere in a crontab command — cron turns it into a newline.
 > `date -Is` sidesteps that; `date +%F` would break the line.
+>
+> Artist profiles run at **06:00** (3 hours after artwork ingest at 03:00) so
+> museum IIIF traffic and Wikipedia / Commons traffic do not overlap on the
+> same AWS IP. The job itself is sequential (~2.5s pause between artists).
 
 ### Artist profile cron (For You story cards)
 
 Artwork ingest (IIIF / museum APIs) grows the catalog. The **artist profile**
-job builds cards from **museum data only — no Wikipedia / Wikidata**:
+job then builds **up to 50 ready cards per day**:
 
 ```
-Museum / IIIF artworks in Supabase  ──►  collection titles + museum bio  ─┐
-Museum / catalog artist avatar_url  ──►  person photo (required)         ─┼─►  profile_ready
+Museum / IIIF catalog first     ──►  bio + avatar when available     ─┐
+Wikipedia / Wikidata if needed  ──►  fill thin bio / missing photo   ─┼─►  profile_ready
+Collection titles from artworks ──►  "famous works" on the card      ─┘
 ```
+
+`--limit=50` means **50 ready cards**, not 50 attempts. The job keeps scanning
+until it marks 50 artists `profile_ready=true` (or the pool is exhausted).
+
+Rate limiting (important on EC2):
+
+- **1 artist at a time** (no parallel Wikimedia calls)
+- **~2.5s pause** between artists (+ jitter)
+- Extra pause after Wikipedia lookup and after portrait download
+- Scheduled **3 hours after** the artwork IIIF ingest
 
 Rules:
 
-- **No museum person photograph → no card.**
-- **No rich museum bio → no card.**
+- Museum data first; Wikipedia / Wikidata only when photo or bio is missing/thin.
+- Still **no card without a real person photograph**.
 - Frontend only shows artist story slides when `profile_ready = true`.
 
 One-time SQL (Supabase → SQL Editor):
@@ -190,8 +205,10 @@ Manual run on EC2:
 
 ```bash
 cd ~/narsil-museum-backend
+git pull
+npm install
 npm run build
-npm run ingest:artists:prod -- --limit=40
+npm run ingest:artists:prod -- --limit=50
 # dry-run:
 # npm run ingest:artists -- --dry-run --limit=10
 ```
@@ -272,7 +289,7 @@ once in the Supabase SQL Editor after that ingest completes.
 | `INGEST_SKIP_EXISTING` | true | Skip images already in S3 (set `false` to re-upload) |
 | `INGEST_CONCURRENCY` | 6 | Parallel downloads/uploads |
 | `S3_ARTIST_PREFIX` | artworks/artists | Legacy portrait folder (Wikidata portraits disabled) |
-| Artist profile cron | `npm run ingest:artists` | Museum/IIIF only → `profile_ready` |
+| Artist profile cron | `npm run ingest:artists -- --limit=50` | Make up to 50 ready cards/day (museum first, Wikipedia if needed) |
 
 ### Rolling back to a single source
 

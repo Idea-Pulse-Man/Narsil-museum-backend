@@ -1,39 +1,64 @@
 /**
  * Artist profile cron — AWS EC2 companion to the artwork ingest job.
  * ---------------------------------------------------------------------------
- * Builds For You artist story profiles from **museum / IIIF catalog data only**.
- * No Wikipedia / Wikidata.
+ * Builds For You artist story profiles until TARGET ready cards are made
+ * (default 50 / day).
  *
- *   • Collection titles → artworks already ingested (IIIF / Met / CMA / …)
- *   • Bio text          → museum artist bio + collection titles
- *   • Person photograph → existing museum/catalog `avatar_url` only
+ * Cascade (same for bio and photo):
+ *   1. Museum / IIIF catalog data first
+ *   2. Wikipedia / Wikidata only when museum photo or bio is missing/thin
  *
  * Rules:
- *   - NO real person photograph on the artist row → no card (`profile_ready=false`).
- *   - Thin / stub museum bios → no card.
+ *   - Still no card without a real person photograph (museum or Wikidata).
+ *   - `--limit=N` means make up to N *ready* cards this run (not N attempts).
  *
  * Usage:
  *   npm run ingest:artists -- --dry-run
  *   npm run ingest:artists
- *   npm run ingest:artists -- --limit=40 --force
+ *   npm run ingest:artists -- --limit=50 --force
+ *   npm run ingest:artists -- --museum-only   # never call Wikipedia / Wikidata
  *
- * Cron: see INGEST.md (runs after the artwork / IIIF ingest).
+ * Cron: see INGEST.md (after artwork ingest).
  */
 import "dotenv/config";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { env } from "../config/env.js";
-import { isUnresolvablePortraitName } from "../museum/artistPhoto.js";
+import {
+  getArtistPhotoUrl,
+  isUnresolvablePortraitName,
+} from "../museum/artistPhoto.js";
 import {
   composeDetailedArtistBio,
+  enrichArtistFromWikipedia,
   isMuseumStubBio,
   museumBioIsSufficient,
   PROFILE_READY_MIN_BIO,
   type CollectionWork,
 } from "../museum/artistWiki.js";
+import { S3ImageStore } from "./s3.js";
 
 const PAGE = 200;
-const DEFAULT_LIMIT = 40;
-const CONCURRENCY = 2;
+/** Default number of *ready* artist cards to produce per daily run. */
+const DEFAULT_TARGET_READY = 50;
+/**
+ * One artist at a time. Parallel Wikimedia / Commons hits from a single EC2
+ * IP get throttled (429) quickly — sequential is slower but reliable.
+ */
+const CONCURRENCY = 1;
+/** Pause between artists so Wikimedia / Commons do not flag the AWS IP. */
+const DELAY_BETWEEN_ARTISTS_MS = 2_500;
+/** Extra pause after a Wikipedia / Wikidata round-trip. */
+const DELAY_AFTER_WIKI_MS = 1_200;
+/** Extra pause after downloading a portrait image. */
+const DELAY_AFTER_PORTRAIT_MS = 800;
+/** Safety cap so a bad night cannot walk the entire catalog forever. */
+const MAX_ATTEMPTS = 500;
+
+const WIKIMEDIA_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "NarsilMuseumBot/1.0 (https://github.com/Idea-Pulse-Man/Narsil-museum-backend) artist-profiles",
+  Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+};
 
 interface ArtistRow {
   id: string;
@@ -53,13 +78,24 @@ interface ArtistRow {
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
 const FORCE = args.includes("--force");
+const MUSEUM_ONLY = args.includes("--museum-only");
 const limitArg = args.find((a) => a.startsWith("--limit="));
-const LIMIT = limitArg
-  ? Math.max(1, Number(limitArg.split("=")[1]) || DEFAULT_LIMIT)
-  : DEFAULT_LIMIT;
+const TARGET_READY = limitArg
+  ? Math.max(1, Number(limitArg.split("=")[1]) || DEFAULT_TARGET_READY)
+  : DEFAULT_TARGET_READY;
+
+function artistPortraitKey(id: string): string {
+  return `${env.aws.s3ArtistPrefix}/${id}.jpg`;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Sleep with a little jitter so request timing is not perfectly metronomic. */
+async function politeDelay(baseMs: number): Promise<void> {
+  const jitter = Math.floor(Math.random() * Math.min(800, baseMs * 0.4));
+  await sleep(baseMs + jitter);
 }
 
 async function mapLimit<T, R>(
@@ -81,10 +117,31 @@ async function mapLimit<T, R>(
   return out;
 }
 
-/** True when the artist row already has a usable person photograph URL. */
-function hasMuseumPortrait(avatarUrl: string | null | undefined): boolean {
+function hasPortraitUrl(avatarUrl: string | null | undefined): boolean {
   const url = (avatarUrl ?? "").trim();
   return !!url && /^https?:\/\//i.test(url);
+}
+
+async function downloadPortrait(
+  url: string,
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const res = await fetch(url, {
+      headers: WIKIMEDIA_HEADERS,
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`portrait HTTP ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length === 0) throw new Error("empty portrait body");
+    return {
+      buffer,
+      contentType: res.headers.get("content-type") ?? "image/jpeg",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function loadCollectionWorks(
@@ -112,16 +169,216 @@ async function loadCollectionWorks(
     }));
 }
 
+/**
+ * Museum/catalog avatar first; Wikidata only if missing (unless --museum-only).
+ */
+async function resolvePortrait(
+  artist: ArtistRow,
+  s3: S3ImageStore | null,
+): Promise<{ url: string | null; source: "museum" | "wikipedia" | "none" }> {
+  if (isUnresolvablePortraitName(artist.name)) {
+    return { url: null, source: "none" };
+  }
+
+  if (hasPortraitUrl(artist.avatar_url)) {
+    return { url: artist.avatar_url!.trim(), source: "museum" };
+  }
+
+  if (MUSEUM_ONLY) return { url: null, source: "none" };
+
+  const key = artistPortraitKey(artist.id);
+  if (s3 && env.ingest.skipExisting && (await s3.exists(key))) {
+    return { url: s3.publicUrl(key), source: "museum" };
+  }
+
+  const portraitUrl = await getArtistPhotoUrl(artist.name);
+  if (!portraitUrl) return { url: null, source: "none" };
+
+  if (DRY_RUN || !s3) {
+    return { url: portraitUrl, source: "wikipedia" };
+  }
+
+  const { buffer, contentType } = await downloadPortrait(portraitUrl);
+  const url = await s3.upload(key, buffer, contentType);
+  await politeDelay(DELAY_AFTER_PORTRAIT_MS);
+  return { url, source: "wikipedia" };
+}
+
 function knownForFrom(
+  description: string,
   famousWorks: string[],
   existing: string | null,
   style: string | null,
 ): string {
   if (famousWorks.length > 0) return famousWorks.slice(0, 3).join(", ");
+  if (description) return description;
   const known = (existing ?? "").trim();
   if (known && !/^Museum collection$/i.test(known)) return known;
   const s = (style ?? "").trim();
   return s && s !== "—" ? s : known;
+}
+
+type ProcessResult =
+  | { status: "ready" }
+  | { status: "noPhoto" }
+  | { status: "noBio" }
+  | { status: "thin" }
+  | { status: "failed" };
+
+async function processArtist(
+  client: SupabaseClient,
+  s3: S3ImageStore | null,
+  row: ArtistRow,
+): Promise<ProcessResult> {
+  try {
+    const portrait = await resolvePortrait(row, s3);
+    if (!portrait.url) {
+      if (!DRY_RUN) {
+        await client
+          .from("artists")
+          .update({ profile_ready: false })
+          .eq("id", row.id);
+      }
+      console.log(`  ✗ no photo — skip: ${row.name}`);
+      return { status: "noPhoto" };
+    }
+
+    const collectionWorks = await loadCollectionWorks(client, row.id);
+    const famousFromCatalog = collectionWorks.map((w) => w.title).slice(0, 6);
+
+    const museumOk = museumBioIsSufficient(row.bio, collectionWorks);
+    let wiki: Awaited<ReturnType<typeof enrichArtistFromWikipedia>> = null;
+    let bioSource = "museum";
+
+    if (!museumOk && !MUSEUM_ONLY) {
+      wiki = await enrichArtistFromWikipedia(row.name);
+      await politeDelay(DELAY_AFTER_WIKI_MS);
+      bioSource = wiki ? "wikipedia+museum" : "museum";
+    }
+
+    if (
+      !museumOk &&
+      (!wiki || (!wiki.bio && wiki.famousWorks.length === 0)) &&
+      (isMuseumStubBio(row.bio) || (row.bio ?? "").trim().length < 80)
+    ) {
+      if (!DRY_RUN) {
+        await client
+          .from("artists")
+          .update({
+            avatar_url: portrait.url,
+            profile_ready: false,
+          })
+          .eq("id", row.id);
+      }
+      console.log(`  ✗ bio too thin — skip: ${row.name}`);
+      return { status: "noBio" };
+    }
+
+    const famousWorks =
+      (wiki?.famousWorks?.length ?? 0) > 0
+        ? wiki!.famousWorks
+        : (row.famous_works ?? []).filter((w) => w?.trim()).length > 0
+          ? (row.famous_works ?? []).map((w) => w.trim()).filter(Boolean)
+          : famousFromCatalog;
+
+    const detailedBio = composeDetailedArtistBio({
+      museumBio: row.bio ?? "",
+      wikiBio: wiki?.bio ?? "",
+      description: wiki?.description,
+      famousWorks,
+      collectionWorks,
+      artistName: row.name,
+    });
+
+    if (
+      detailedBio.length < PROFILE_READY_MIN_BIO ||
+      isMuseumStubBio(detailedBio)
+    ) {
+      if (!DRY_RUN) {
+        await client
+          .from("artists")
+          .update({
+            avatar_url: portrait.url,
+            profile_ready: false,
+          })
+          .eq("id", row.id);
+      }
+      console.log(
+        `  ✗ composed bio too thin (${detailedBio.length}c) — skip: ${row.name}`,
+      );
+      return { status: "thin" };
+    }
+
+    const nextPeriod =
+      row.period && row.period !== "—"
+        ? row.period
+        : wiki?.periodHint || row.period;
+
+    const payload = {
+      avatar_url: portrait.url,
+      bio: detailedBio,
+      known_for: knownForFrom(
+        wiki?.description ?? "",
+        famousWorks,
+        row.known_for,
+        row.style,
+      ),
+      famous_works: famousWorks,
+      profile_ready: true,
+      ...(wiki?.qid
+        ? {
+            wikidata_qid: wiki.qid,
+            wikipedia_url: wiki.wikipediaUrl ?? null,
+            wiki_enriched_at: new Date().toISOString(),
+          }
+        : {}),
+      ...(nextPeriod ? { period: nextPeriod } : {}),
+    };
+
+    if (!DRY_RUN) {
+      const { error } = await client
+        .from("artists")
+        .update(payload)
+        .eq("id", row.id);
+      if (error) throw new Error(error.message);
+    }
+
+    console.log(
+      `  ✓ ${row.name} [bio=${bioSource}, photo=${portrait.source}] ` +
+        `(bio ${detailedBio.length}c, ${famousWorks.length} works, ${collectionWorks.length} in catalog)`,
+    );
+    return { status: "ready" };
+  } catch (err) {
+    console.warn(
+      `  ✗ ${row.name}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { status: "failed" };
+  }
+}
+
+async function loadCandidatePage(
+  client: SupabaseClient,
+  from: number,
+): Promise<ArtistRow[]> {
+  let query = client
+    .from("artists")
+    .select(
+      "id, name, bio, known_for, famous_works, avatar_url, lifespan, nationality, period, style, profile_type, profile_ready",
+    )
+    .eq("profile_type", "historical")
+    .order("followers", { ascending: false })
+    .order("id")
+    .range(from, from + PAGE - 1);
+
+  if (!FORCE) {
+    query = query.or("profile_ready.is.null,profile_ready.eq.false");
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as ArtistRow[]).filter(
+    (row) => !isUnresolvablePortraitName(row.name),
+  );
 }
 
 async function main(): Promise<void> {
@@ -132,158 +389,78 @@ async function main(): Promise<void> {
   const client = createClient(env.supabase.url, env.supabase.serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  const s3 =
+    DRY_RUN || MUSEUM_ONLY
+      ? null
+      : env.aws.s3Bucket
+        ? new S3ImageStore()
+        : null;
 
   console.log(
-    `Artist profiles (museum/IIIF only)${DRY_RUN ? " (dry-run)" : ""}${FORCE ? " (force)" : ""} limit=${LIMIT}`,
+    `Artist profiles targetReady=${TARGET_READY}` +
+      `${DRY_RUN ? " (dry-run)" : ""}` +
+      `${FORCE ? " (force)" : ""}` +
+      `${MUSEUM_ONLY ? " (museum-only)" : " (museum first, Wikipedia if needed)"}` +
+      ` concurrency=${CONCURRENCY} delay≈${DELAY_BETWEEN_ARTISTS_MS}ms/artist`,
   );
-
-  const candidates: ArtistRow[] = [];
-  let from = 0;
-  for (;;) {
-    let query = client
-      .from("artists")
-      .select(
-        "id, name, bio, known_for, famous_works, avatar_url, lifespan, nationality, period, style, profile_type, profile_ready",
-      )
-      .eq("profile_type", "historical")
-      .order("followers", { ascending: false })
-      .order("id")
-      .range(from, from + PAGE - 1);
-
-    if (!FORCE) {
-      query = query.or("profile_ready.is.null,profile_ready.eq.false");
-    }
-
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
-    const rows = (data ?? []) as ArtistRow[];
-    if (rows.length === 0) break;
-
-    for (const row of rows) {
-      if (isUnresolvablePortraitName(row.name)) continue;
-      candidates.push(row);
-      if (candidates.length >= LIMIT) break;
-    }
-    if (candidates.length >= LIMIT || rows.length < PAGE) break;
-    from += PAGE;
-  }
-
-  console.log(`  candidates=${candidates.length}`);
 
   let ready = 0;
   let noPhoto = 0;
   let noBio = 0;
+  let thin = 0;
   let failed = 0;
-  let skipped = 0;
+  let attempted = 0;
+  let from = 0;
+  let exhausted = false;
 
-  await mapLimit(candidates, CONCURRENCY, async (row) => {
-    try {
-      // 1) Person photograph — museum/catalog only. No Wikipedia / Wikidata.
-      if (!hasMuseumPortrait(row.avatar_url)) {
-        noPhoto++;
-        if (!DRY_RUN) {
-          await client
-            .from("artists")
-            .update({ profile_ready: false })
-            .eq("id", row.id);
-        }
-        console.log(`  ✗ no museum photo — skip card: ${row.name}`);
-        return;
-      }
-      const avatarUrl = row.avatar_url!.trim();
-
-      // 2) Collection works from the artwork / IIIF ingest
-      const collectionWorks = await loadCollectionWorks(client, row.id);
-      await sleep(20);
-
-      if (!museumBioIsSufficient(row.bio, collectionWorks)) {
-        noBio++;
-        if (!DRY_RUN) {
-          await client
-            .from("artists")
-            .update({
-              avatar_url: avatarUrl,
-              profile_ready: false,
-            })
-            .eq("id", row.id);
-        }
-        console.log(`  ✗ museum bio too thin — skip card: ${row.name}`);
-        return;
-      }
-
-      const famousWorks =
-        (row.famous_works ?? []).filter((w) => w?.trim()).length > 0
-          ? (row.famous_works ?? []).map((w) => w.trim()).filter(Boolean)
-          : collectionWorks.map((w) => w.title).slice(0, 6);
-
-      const detailedBio = composeDetailedArtistBio({
-        museumBio: row.bio ?? "",
-        wikiBio: "",
-        famousWorks,
-        collectionWorks,
-        artistName: row.name,
-      });
-
-      if (
-        detailedBio.length < PROFILE_READY_MIN_BIO ||
-        isMuseumStubBio(detailedBio)
-      ) {
-        skipped++;
-        console.log(
-          `  ✗ bio too thin (${detailedBio.length}c) — skip card: ${row.name}`,
-        );
-        if (!DRY_RUN) {
-          await client
-            .from("artists")
-            .update({
-              avatar_url: avatarUrl,
-              profile_ready: false,
-            })
-            .eq("id", row.id);
-        }
-        return;
-      }
-
-      const payload = {
-        avatar_url: avatarUrl,
-        bio: detailedBio,
-        known_for: knownForFrom(famousWorks, row.known_for, row.style),
-        famous_works: famousWorks,
-        profile_ready: true,
-      };
-
-      if (DRY_RUN) {
-        ready++;
-        console.log(
-          `  · READY ${row.name}: bio=${detailedBio.length}c works=${famousWorks.slice(0, 3).join(" | ") || "—"} collection=${collectionWorks.length}`,
-        );
-        return;
-      }
-
-      const { error } = await client
-        .from("artists")
-        .update(payload)
-        .eq("id", row.id);
-      if (error) throw new Error(error.message);
-      ready++;
-      console.log(
-        `  ✓ ${row.name} (bio ${detailedBio.length}c, ${famousWorks.length} famous, ${collectionWorks.length} in catalog)`,
-      );
-    } catch (err) {
-      failed++;
-      console.warn(
-        `  ✗ ${row.name}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+  // Keep pulling candidates until we hit TARGET_READY ready cards (or caps).
+  while (ready < TARGET_READY && attempted < MAX_ATTEMPTS && !exhausted) {
+    const page = await loadCandidatePage(client, from);
+    if (page.length === 0) {
+      exhausted = true;
+      break;
     }
-  });
+    from += PAGE;
+
+    // One (or few) at a time with a pause between artists — protects the EC2
+    // IP from Wikimedia / Commons rate limits.
+    const chunkSize = CONCURRENCY;
+    for (let i = 0; i < page.length && ready < TARGET_READY; i += chunkSize) {
+      const batch = page.slice(i, i + chunkSize);
+      const results = await mapLimit(batch, CONCURRENCY, (row) =>
+        processArtist(client, s3, row),
+      );
+
+      for (const r of results) {
+        attempted++;
+        if (r.status === "ready") {
+          if (ready < TARGET_READY) ready++;
+        } else if (r.status === "noPhoto") noPhoto++;
+        else if (r.status === "noBio") noBio++;
+        else if (r.status === "thin") thin++;
+        else failed++;
+      }
+
+      if (ready < TARGET_READY && i + chunkSize < page.length) {
+        await politeDelay(DELAY_BETWEEN_ARTISTS_MS);
+      }
+    }
+
+    if (page.length < PAGE) exhausted = true;
+  }
 
   console.log(
-    `Done. ready=${ready} noPhoto=${noPhoto} noBio=${noBio} thin=${skipped} failed=${failed}` +
+    `Done. ready=${ready}/${TARGET_READY} attempted=${attempted} ` +
+      `noPhoto=${noPhoto} noBio=${noBio} thin=${thin} failed=${failed}` +
+      `${exhausted ? " (pool exhausted)" : ""}` +
       `${DRY_RUN ? " (dry-run)" : ""}`,
   );
-  console.log(
-    "Museum/IIIF only — no Wikipedia. Cards require museum photo + rich museum bio.",
-  );
+  if (ready < TARGET_READY) {
+    console.log(
+      `Stopped early with ${ready} ready (wanted ${TARGET_READY}). ` +
+        `More museum ingest or a larger artist pool will help tomorrow.`,
+    );
+  }
 }
 
 main().catch((err) => {
