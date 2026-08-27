@@ -12,6 +12,10 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Artwork, Artist } from "../types/domain.js";
 import { env } from "../config/env.js";
+import {
+  forSaleFromIngestedArtwork,
+  museumSourceIdFromArtworkId,
+} from "../museum/museumSource.js";
 import { chunk } from "../utils/http.js";
 
 const BATCH = 200;
@@ -84,6 +88,8 @@ export class SupabaseCatalogStore {
       accent: a.accent,
       tags: a.tags,
       empire: a.empire ?? null,
+      museum_source_id: museumSourceIdFromArtworkId(a.id),
+      for_sale: forSaleFromIngestedArtwork(a),
     }));
 
     for (const batch of chunk(rows, BATCH)) {

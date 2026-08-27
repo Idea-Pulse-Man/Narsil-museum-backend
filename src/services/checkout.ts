@@ -29,6 +29,7 @@ import {
 import { isSubscriber } from "./subscriptions.js";
 import { buildRecipient, type AddressRow } from "./recipient.js";
 import { createPrintfulOrder, resolveVariantId } from "./printful.js";
+import { assertCanvasSellable } from "./sellability.js";
 
 export interface AuthedUser {
   id: string;
@@ -155,6 +156,7 @@ export async function createCheckout(
   const stripe = getStripe(); // 503s early when Stripe is unconfigured
 
   const size: CanvasSize = input.size;
+  await assertCanvasSellable(input.artworkId);
   const artwork = await loadArtwork(catalog, input.artworkId);
   const address = await loadAddress(input.addressId, user.id);
   buildRecipient(address, user.email); // validate deliverability before paying
@@ -327,6 +329,7 @@ export async function finalizeOrder(
       intent.receipt_email ?? intent.metadata?.email ?? undefined;
     const recipient = buildRecipient(address, email ?? undefined);
 
+    await assertCanvasSellable(order.artwork_id);
     const artwork = await loadArtwork(catalog, order.artwork_id);
     if (!artwork.image) {
       throw new HttpError(409, "This artwork has no print image.");
