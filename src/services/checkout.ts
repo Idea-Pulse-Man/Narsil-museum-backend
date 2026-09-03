@@ -22,11 +22,8 @@ import { getStripe } from "./stripe.js";
 import {
   isCanvasSize,
   priceForSize,
-  subscriberPrice,
-  SUBSCRIBER_DISCOUNT_PCT,
   type CanvasSize,
 } from "./pricing.js";
-import { isSubscriber } from "./subscriptions.js";
 import { buildRecipient, type AddressRow } from "./recipient.js";
 import { createPrintfulOrder, resolveVariantId } from "./printful.js";
 import { assertCanvasSellable } from "./sellability.js";
@@ -47,11 +44,11 @@ export interface CheckoutIntent {
   clientSecret: string;
   amount: number;
   currency: string;
-  /** What the customer actually pays (discounted for Narsil Pro members). */
+  /** What the customer pays. Canvas has no subscriber discount. */
   price: number;
-  /** Undiscounted price, so the app can show the struck-through original. */
+  /** Same as `price` — kept so older app builds still parse the intent. */
   listPrice: number;
-  /** 20 for a Pro member, 0 otherwise — drives the checkout-bar discount line. */
+  /** Always 0. Canvas is full price for everyone. */
   discountPct: number;
 }
 
@@ -100,10 +97,8 @@ async function loadArtwork(catalog: CatalogService, artworkId: string) {
  * Revenue split for artist originals — mirrors the old client-side logic but
  * reads the artist's opt-in + share straight from Supabase.
  *
- * The artist's share is computed from `listPrice`, NOT from what the customer
- * paid: a Narsil Pro discount is a promotion the platform chose to run, and
- * artists never agreed to fund it. The whole discount therefore comes out of
- * `platformCut`.
+ * The artist's share is computed from the list price (which is also what
+ * the customer pays — canvas has no subscriber discount).
  */
 async function revenueSplit(
   origin: string,
@@ -122,13 +117,10 @@ async function revenueSplit(
   const artistCut = Math.round(listPrice * (pct / 100) * 100) / 100;
   const platformCut = Math.round((paidPrice - artistCut) * 100) / 100;
 
-  // Only reachable with a revenue share above 80%, where the discount is wider
-  // than the platform's entire margin. The artist is still paid in full — the
-  // platform takes the loss — but this should never happen silently.
   if (platformCut < 0) {
     console.warn(
       `[checkout] artist ${artistId} at ${pct}% leaves the platform ` +
-        `${platformCut} on a discounted order (list ${listPrice}, paid ${paidPrice}).`,
+        `${platformCut} (list ${listPrice}, paid ${paidPrice}).`,
     );
   }
   return { artistCut, platformCut };
@@ -162,12 +154,9 @@ export async function createCheckout(
   buildRecipient(address, user.email); // validate deliverability before paying
   await resolveVariantId(size); // validate the Printful variant exists
 
-  // Narsil Pro members pay 20% less. Entitlement is read server-side — the app
-  // is never asked whether its user is a subscriber.
   const listPrice = priceForSize(artwork.id, size);
-  const pro = await isSubscriber(user.id);
-  const price = pro ? subscriberPrice(listPrice) : listPrice;
-  const discountPct = pro ? SUBSCRIBER_DISCOUNT_PCT : 0;
+  const price = listPrice;
+  const discountPct = 0;
 
   const { artistCut, platformCut } = await revenueSplit(
     artwork.origin,

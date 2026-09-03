@@ -3,7 +3,6 @@
  * subscriber?".
  * ---------------------------------------------------------------------------
  * Every paid perk reads `isSubscriber()` server-side:
- *   · the 20% canvas discount   (services/checkout.ts)
  *   · the high-resolution download gate (routes/artworks.ts)
  *
  * The app is told its own state via GET /api/me/subscription, but that answer
@@ -71,9 +70,7 @@ async function loadRow(userId: string): Promise<SubscriptionRow | null> {
     .maybeSingle();
 
   if (error) {
-    // Fail CLOSED. A lookup failure must not hand out the discount or the
-    // high-res download — the cost of a wrongly-denied perk is one support
-    // ticket, the cost of a wrongly-granted one is money on every order.
+    // Fail CLOSED. A lookup failure must not hand out the high-res download.
     console.error(`[subscriptions] lookup failed for ${userId}: ${error.message}`);
     return null;
   }

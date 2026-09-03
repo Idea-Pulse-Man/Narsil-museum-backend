@@ -2,7 +2,7 @@
  * Current-user routes.
  *
  *   GET /api/me/subscription — the app's own Narsil Pro state, for rendering
- *     the paywall, the "Pro" badge and the discount line.
+ *     the paywall and the "Pro" badge.
  *
  * This answer is for DISPLAY ONLY. Every paid perk re-checks entitlement
  * server-side (`services/subscriptions.ts` → `isSubscriber`), because a client

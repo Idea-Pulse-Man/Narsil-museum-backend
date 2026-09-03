@@ -6,32 +6,30 @@
  * ---------------------------------------------------------------------------
  * How these prices were derived (re-run this math if Printful's rates move)
  * ---------------------------------------------------------------------------
- * Printful catalog product 3 ("Canvas (in)"), US fulfillment, fetched from
- * `GET https://api.printful.com/products/3`:
+ * Printful catalog product 3 ("Canvas (in)"), US fulfillment, live from
+ * `GET https://api.printful.com/products/3` (Sep 2026):
  *
- *   Size          Variant  Print cost   Shipping*   Landed
- *   12″×16″           5      $23.41      ~$9.95     ~$33.36
- *   18″×24″           7      $33.66     ~$12.95     ~$46.61
- *   24″×36″         825      $52.02     ~$19.95     ~$71.97
+ *   Size          Variant  Print cost   US shipping*   Landed
+ *   12″×16″           5      $23.41      $10.39        $33.80
+ *   18″×24″           7      $33.66      $10.39        $44.05
+ *   24″×36″         825      $52.02      $10.39        $62.41
  *
- *   *Shipping is an estimate from Printful's published US canvas rates and is
- *    the ONE number here not read from their API. Confirm it against a real
- *    order before treating these margins as exact.
+ *   *Printful's published canvas table puts all three of these sizes in the
+ *    same US "medium canvas" bucket ($10.39 first item). There is no
+ *    separate shipping line at checkout — postage is absorbed into the list.
  *
- * There is no separate shipping line at checkout — postage is absorbed into
- * these prices deliberately (the customer sees one number, no shipping shock).
+ * There is no subscriber discount on canvas. Narsil Pro is digital access
+ * (quiz, high-res download); prints are full price for everyone.
  *
- * Prices are set so that the SUBSCRIBER price — i.e. after
- * SUBSCRIBER_DISCOUNT_PCT — still clears ~36% gross margin net of Stripe's
- * 2.9% + $0.30. Pricing down from list would leave the small canvas at ~$12.
+ * List prices target ~40%+ gross after Stripe's 2.9% + $0.30:
  *
- *   Size     List   Subscriber   Margin (sub)   Margin (list)
- *   Small     $69      $55.20      $19.94  36%    $33.34  48%
- *   Medium    $99      $79.20      $29.99  38%    $49.22  50%
- *   Large    $149     $119.20      $43.47  36%    $72.41  49%
+ *   Size     List    Margin $    Margin %
+ *   Small     $59     ~$23.20      ~39%
+ *   Medium    $89     ~$42.10      ~47%
+ *   Large    $129     ~$62.50      ~48%
  *
- * Only Small moved (was $59, which left ~$12 once discounted). Medium and
- * Large were already correctly priced against real Printful costs.
+ * A deterministic +$0 / +$5 / +$10 per-artwork offset still applies on top
+ * of these bases (see `priceFromId`).
  */
 
 export type CanvasSize = "Small" | "Medium" | "Large";
@@ -40,21 +38,13 @@ export const CANVAS_SIZES: Record<
   CanvasSize,
   { dimensions: string; price: number }
 > = {
-  Small: { dimensions: '12 × 16"', price: 69 },
-  Medium: { dimensions: '18 × 24"', price: 99 },
-  Large: { dimensions: '24 × 36"', price: 149 },
+  Small: { dimensions: '12 × 16"', price: 59 },
+  Medium: { dimensions: '18 × 24"', price: 89 },
+  Large: { dimensions: '24 × 36"', price: 129 },
 };
-
-/** Narsil Pro discount applied to canvas orders for active subscribers. */
-export const SUBSCRIBER_DISCOUNT_PCT = 20;
 
 export function isCanvasSize(value: string): value is CanvasSize {
   return value in CANVAS_SIZES;
-}
-
-/** Round to whole cents — prices are charged as `Math.round(price * 100)`. */
-function round2(value: number): number {
-  return Math.round(value * 100) / 100;
 }
 
 /** Deterministic per-artwork "from" price (same hash as the frontend). */
@@ -68,15 +58,4 @@ export function priceFromId(id: string): number {
 export function priceForSize(artworkId: string, size: CanvasSize): number {
   const offset = priceFromId(artworkId) - CANVAS_SIZES.Small.price;
   return CANVAS_SIZES[size].price + offset;
-}
-
-/**
- * Apply the Narsil Pro discount to a list price.
- *
- * Callers must keep the undiscounted price around: the artist revenue split is
- * computed from the LIST price, so a subscriber's discount comes out of the
- * platform's cut and never out of the artist's (see services/checkout.ts).
- */
-export function subscriberPrice(listPrice: number): number {
-  return round2(listPrice * (1 - SUBSCRIBER_DISCOUNT_PCT / 100));
 }
