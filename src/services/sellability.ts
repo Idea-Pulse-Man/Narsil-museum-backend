@@ -10,9 +10,29 @@ interface SellabilityRow {
   origin: string;
   for_sale: boolean | null;
   museum_source_id: string | null;
+  category: string | null;
+  medium: string | null;
+  title: string | null;
+}
+
+const NON_CANVAS_CATEGORIES = new Set(["sculptures", "pottery"]);
+
+const NON_CANVAS_OBJECT_RE =
+  /\b(sculpture|statue|bust|figurine|terracotta|ceramic|porcelain|earthenware|stoneware|amphora|vase|vessel|pottery|marble|bronze|alabaster|faience|steatite|relief|carved|carving)\b|\b(covered\s+)?(pot|jar|bowl|urn|ewer|kylix|krater)\b/i;
+
+/** Flat wall art only — pots / sculpture are not canvas merch. */
+export function isCanvasPrintSuitable(row: {
+  category: string | null;
+  medium: string | null;
+  title: string | null;
+}): boolean {
+  if (row.category && NON_CANVAS_CATEGORIES.has(row.category)) return false;
+  const haystack = `${row.medium ?? ""} ${row.title ?? ""}`;
+  return !NON_CANVAS_OBJECT_RE.test(haystack);
 }
 
 export function isCanvasSellable(row: SellabilityRow): boolean {
+  if (!isCanvasPrintSuitable(row)) return false;
   if (row.origin === "artist-original") {
     return row.for_sale === true;
   }
@@ -27,7 +47,7 @@ export async function loadArtworkSellability(
 ): Promise<SellabilityRow | null> {
   const { data, error } = await supabaseAdmin()
     .from("artworks")
-    .select("origin, for_sale, museum_source_id")
+    .select("origin, for_sale, museum_source_id, category, medium, title")
     .eq("id", artworkId)
     .maybeSingle();
   if (error) {
