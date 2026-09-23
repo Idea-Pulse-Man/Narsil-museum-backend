@@ -12,10 +12,8 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Artwork, Artist } from "../types/domain.js";
 import { env } from "../config/env.js";
-import {
-  forSaleFromIngestedArtwork,
-  museumSourceIdFromArtworkId,
-} from "../museum/museumSource.js";
+import { museumSourceIdFromArtworkId } from "../museum/museumSource.js";
+import { forSaleFromIngestedArtwork } from "../services/sellability.js";
 import { chunk } from "../utils/http.js";
 
 const BATCH = 200;
