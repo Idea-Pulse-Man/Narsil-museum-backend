@@ -161,6 +161,7 @@ last month's:
 ```cron
 0 3 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) ===" && npm run ingest' >> ~/ingest-cron.log 2>&1
 0 6 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) artist-profiles ===" && npm run ingest:artists:prod -- --limit=50' >> ~/artist-profiles-cron.log 2>&1
+15 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) daily-quiz ===" && npm run quiz:daily:prod' >> ~/daily-quiz-cron.log 2>&1
 ```
 
 > Avoid `%` anywhere in a crontab command — cron turns it into a newline.
@@ -169,6 +170,11 @@ last month's:
 > Artist profiles run at **06:00** (3 hours after artwork ingest at 03:00) so
 > museum IIIF traffic and Wikipedia / Commons traffic do not overlap on the
 > same AWS IP. The job itself is sequential (~2.5s pause between artists).
+>
+> The daily quiz runs at **00:15 UTC** (`quiz:daily:prod`). It writes that UTC
+> day's Royal Assessment into Supabase (10 questions) and skips a day an admin
+> has locked. Run `museum-app/supabase/daily-quiz.sql` once before the first
+> night. Admin specials are never deleted.
 
 ### Artist profile cron (For You story cards)
 
