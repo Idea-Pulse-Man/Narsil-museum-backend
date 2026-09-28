@@ -307,6 +307,18 @@ export async function finalizeOrder(
   if (intent.status !== "succeeded") {
     throw new HttpError(402, "Payment has not completed for this order.");
   }
+  // Only a payment for THIS order, for its full price, may reach Printful.
+  const expectedAmount = Math.round(order.price * 100);
+  if (
+    intent.amount_received !== expectedAmount ||
+    (intent.metadata?.order_id && intent.metadata.order_id !== order.id)
+  ) {
+    console.error(
+      `[checkout] order ${order.id}: payment ${intent.id} received ` +
+        `${intent.amount_received}, expected ${expectedAmount}; not sent to Printful.`,
+    );
+    throw new HttpError(402, "The payment doesn't match this order.");
+  }
 
   // Claim the order. Exactly one concurrent caller gets rows back here; the
   // rest see the claim fail and simply report the current status. An order
