@@ -20,11 +20,36 @@ function list(value: string | undefined, fallback: string[]): string[] {
   return items.length > 0 ? items : fallback;
 }
 
-const corsOrigins = list(process.env.CORS_ORIGIN, [
-  "http://localhost:5173",
-  "http://localhost:3000",
+/**
+ * Origins the shipped app itself runs on — always allowed, whatever
+ * CORS_ORIGIN says, so a trimmed env can't lock out production:
+ * the Vercel web build, the iOS WebView and the Android WebView.
+ */
+const APP_ORIGINS = [
   "https://narsil-app-frontend.vercel.app",
-]);
+  "capacitor://localhost",
+  "https://localhost",
+];
+
+const corsOrigins = [
+  ...new Set([
+    ...APP_ORIGINS,
+    ...list(process.env.CORS_ORIGIN, [
+      "http://localhost:5173",
+      "http://localhost:3000",
+    ]),
+  ]),
+];
+
+/**
+ * Express `trust proxy` setting: how many proxies sit in front of the app.
+ * Production is CloudFront → EC2 (one hop), so the viewer IP is the last
+ * X-Forwarded-For entry. Rate limiting keys on it. Set 0 when running with
+ * no proxy in front.
+ */
+const trustProxyEnv = Number(process.env.TRUST_PROXY);
+const trustProxy =
+  Number.isInteger(trustProxyEnv) && trustProxyEnv >= 0 ? trustProxyEnv : 1;
 
 const imageDelivery =
   process.env.IMAGE_DELIVERY === "direct" ? "direct" : "proxy";
@@ -139,6 +164,9 @@ export const env = {
 
   /** `"*"` (allow any) or an explicit allow-list of origins. */
   corsOrigin: corsOrigins.includes("*") ? ("*" as const) : corsOrigins,
+
+  /** Number of trusted proxy hops in front of the app (see TRUST_PROXY). */
+  trustProxy,
 
   /**
    * Absolute origin of THIS backend, used to build proxied image URLs so the

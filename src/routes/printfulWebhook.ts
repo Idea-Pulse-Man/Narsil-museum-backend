@@ -6,16 +6,23 @@
  *   order_canceled  → status 'cancelled'
  *   order_failed    → status 'fulfillment_failed' (+ reason)
  *
- * Printful doesn't sign webhook payloads, so the endpoint is guarded by a
- * shared secret in the URL. Configure it in the Printful dashboard
- * (Settings → Webhooks) or via their API as:
+ * Printful doesn't sign webhook payloads or send custom headers, so the
+ * endpoint is guarded by a shared secret in the URL. Configure it in the
+ * Printful dashboard (Settings → Webhooks) or via their API as:
  *   https://<backend>/api/printful/webhook?secret=<PRINTFUL_WEBHOOK_SECRET>
  * with the three event types above enabled. Orders are matched by the
  * `external_id` we set at creation — our canvas_orders id.
+ *
+ * A URL secret can leak into access logs, so it is only the first gate: the
+ * payload is treated as a hint, and every status change is confirmed against
+ * Printful's API (authenticated with our key) before anything is written.
+ * Forged events can at worst trigger a re-read of the true state.
  */
-import { Router } from "express";
+import { timingSafeEqual } from "node:crypto";
+import { Router, type Request } from "express";
 import { env } from "../config/env.js";
 import { supabaseAdmin } from "../services/supabaseAdmin.js";
+import { getPrintfulOrder } from "../services/printful.js";
 
 interface PrintfulEvent {
   type?: string;
@@ -31,6 +38,22 @@ interface PrintfulEvent {
   };
 }
 
+const HANDLED_EVENTS = new Set([
+  "package_shipped",
+  "order_canceled",
+  "order_failed",
+]);
+
+/** Constant-time check of the shared secret (URL query, or a header). */
+function secretMatches(req: Request, expected: string): boolean {
+  const header = req.get("x-webhook-secret");
+  const provided =
+    header ?? (typeof req.query.secret === "string" ? req.query.secret : "");
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 export function printfulWebhookRoutes(): Router {
   const router = Router();
 
@@ -43,15 +66,24 @@ export function printfulWebhookRoutes(): Router {
         });
         return;
       }
-      if (req.query.secret !== env.printful.webhookSecret) {
+      if (!secretMatches(req, env.printful.webhookSecret)) {
         res.status(401).json({ error: "Unauthorized", message: "Bad secret." });
         return;
       }
 
       const event = (req.body ?? {}) as PrintfulEvent;
       const orderId = event.data?.order?.external_id;
-      if (!orderId) {
-        // Not one of our checkout orders (e.g. created by hand in Printful).
+      if (!orderId || !HANDLED_EVENTS.has(event.type ?? "")) {
+        // Not one of our checkout orders (e.g. created by hand in Printful),
+        // or an event type we don't act on.
+        res.json({ received: true });
+        return;
+      }
+
+      // Confirm against Printful before writing anything.
+      const order = await getPrintfulOrder(orderId);
+      if (!order) {
+        console.warn(`[printful] webhook for unknown order ${orderId} ignored`);
         res.json({ received: true });
         return;
       }
@@ -59,7 +91,8 @@ export function printfulWebhookRoutes(): Router {
       let update: Record<string, unknown> | null = null;
       switch (event.type) {
         case "package_shipped": {
-          const shipment = event.data?.shipment ?? {};
+          const shipment = order.shipments[order.shipments.length - 1];
+          if (!shipment) break;
           update = {
             status: "shipped",
             tracking_number: shipment.tracking_number ?? null,
@@ -71,16 +104,24 @@ export function printfulWebhookRoutes(): Router {
           break;
         }
         case "order_canceled":
-          update = { status: "cancelled" };
+          if (order.status === "canceled") update = { status: "cancelled" };
           break;
         case "order_failed":
-          update = {
-            status: "fulfillment_failed",
-            fulfillment_error: event.data?.reason ?? "Printful reported a failure",
-          };
+          if (order.status === "failed") {
+            update = {
+              status: "fulfillment_failed",
+              fulfillment_error:
+                event.data?.reason ?? "Printful reported a failure",
+            };
+          }
           break;
-        default:
-          break; // ignore other event types
+      }
+
+      if (!update) {
+        console.warn(
+          `[printful] ${event.type} for order ${orderId} doesn't match ` +
+            `Printful's state (${order.status}); ignored`,
+        );
       }
 
       if (update) {

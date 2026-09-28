@@ -9,6 +9,7 @@ import { adminRoutes } from "./admin.js";
 import { printfulWebhookRoutes } from "./printfulWebhook.js";
 import { appleRoutes } from "./apple.js";
 import { meRoutes } from "./me.js";
+import { requireAdmin } from "../middleware/auth.js";
 
 /** Mounts all `/api/*` routes onto a single router. */
 export function apiRoutes(catalog: CatalogService): Router {
@@ -18,8 +19,9 @@ export function apiRoutes(catalog: CatalogService): Router {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
-  // Manual cache refresh (handy in dev; harmless in prod).
-  router.post("/refresh", (_req, res) => {
+  // Manual cache refresh. Admin-only: each call drops the catalog cache and
+  // forces a rebuild from the upstream museum APIs.
+  router.post("/refresh", requireAdmin, (_req, res) => {
     catalog.refresh();
     res.json({ status: "refreshing" });
   });

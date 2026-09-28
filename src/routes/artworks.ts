@@ -6,6 +6,7 @@ import type { ListResponse, Artwork } from "../types/domain.js";
 import { getArtworkFromSupabase } from "../museum/supabaseArtwork.js";
 import { env } from "../config/env.js";
 import { maybeUser, optionalUser } from "../middleware/auth.js";
+import { downloadLimiter } from "../middleware/rateLimit.js";
 import { isSubscriber } from "../services/subscriptions.js";
 import {
   downloadImageUrl,
@@ -48,7 +49,7 @@ export function artworkRoutes(catalog: CatalogService): Router {
    * Bytes are piped through (not buffered) so large masters don't sit in
    * process memory twice and time-to-first-byte stays snappy.
    */
-  router.get("/:id/download", optionalUser, async (req, res, next) => {
+  router.get("/:id/download", downloadLimiter, optionalUser, async (req, res, next) => {
     try {
       const { id } = req.params;
       const wantsHigh = req.query.res === "high";

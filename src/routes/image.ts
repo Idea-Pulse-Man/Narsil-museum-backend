@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { IiifImageService } from "../museum/iiif.js";
 
 /**
@@ -86,8 +88,19 @@ export function imageRoutes(iiif: IiifImageService): Router {
         if (len) res.setHeader("Content-Length", len);
         res.setHeader("Cache-Control", "public, max-age=86400, immutable");
 
-        const buffer = Buffer.from(await upstreamRes.arrayBuffer());
-        res.end(buffer);
+        // Headers are in, so stop the time-to-first-byte timer and pipe the
+        // bytes through instead of holding the whole image in memory.
+        clearTimeout(timer);
+        try {
+          await pipeline(
+            Readable.fromWeb(upstreamRes.body as import("node:stream/web").ReadableStream),
+            res,
+          );
+        } catch {
+          // Upstream dropped or the client went away mid-stream. Headers are
+          // already sent, so there's nothing to redirect — just end it.
+          if (!res.writableEnded) res.destroy();
+        }
         return;
       }
 

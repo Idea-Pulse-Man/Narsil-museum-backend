@@ -21,7 +21,10 @@ import { supabaseAdmin } from "./supabaseAdmin.js";
 import { getStripe } from "./stripe.js";
 import {
   isCanvasSize,
+  LANDED_COST,
+  MAX_ARTIST_SHARE_PCT,
   priceForSize,
+  stripeFee,
   type CanvasSize,
 } from "./pricing.js";
 import { buildRecipient, type AddressRow } from "./recipient.js";
@@ -98,11 +101,14 @@ async function loadArtwork(catalog: CatalogService, artworkId: string) {
  * reads the artist's opt-in + share straight from Supabase.
  *
  * The artist's share is computed from the list price (which is also what
- * the customer pays — canvas has no subscriber discount).
+ * the customer pays — canvas has no subscriber discount). Artists can edit
+ * their own `artists` row, so the stored percentage is untrusted and is
+ * clamped to MAX_ARTIST_SHARE_PCT here.
  */
 async function revenueSplit(
   origin: string,
   artistId: string,
+  size: CanvasSize,
   listPrice: number,
   paidPrice: number,
 ): Promise<{ artistCut: number | null; platformCut: number | null }> {
@@ -113,14 +119,23 @@ async function revenueSplit(
     .eq("id", artistId)
     .maybeSingle();
   if (!data?.sell_opt_in) return { artistCut: null, platformCut: null };
-  const pct = (data.revenue_share_pct as number | null) ?? 30;
+  const stored = (data.revenue_share_pct as number | null) ?? MAX_ARTIST_SHARE_PCT;
+  const pct = Math.min(Math.max(stored, 0), MAX_ARTIST_SHARE_PCT);
+  if (pct !== stored) {
+    console.warn(
+      `[checkout] artist ${artistId} has revenue_share_pct ${stored}; ` +
+        `capped at ${pct}%.`,
+    );
+  }
   const artistCut = Math.round(listPrice * (pct / 100) * 100) / 100;
   const platformCut = Math.round((paidPrice - artistCut) * 100) / 100;
 
-  if (platformCut < 0) {
-    console.warn(
-      `[checkout] artist ${artistId} at ${pct}% leaves the platform ` +
-        `${platformCut} (list ${listPrice}, paid ${paidPrice}).`,
+  // platform_cut is gross; Printful and Stripe still come out of it.
+  const net = platformCut - LANDED_COST[size] - stripeFee(paidPrice);
+  if (net < 0) {
+    console.error(
+      `[checkout] artist ${artistId} at ${pct}% leaves Narsil ` +
+        `${net.toFixed(2)} after print, shipping and Stripe (paid ${paidPrice}).`,
     );
   }
   return { artistCut, platformCut };
@@ -161,6 +176,7 @@ export async function createCheckout(
   const { artistCut, platformCut } = await revenueSplit(
     artwork.origin,
     artwork.artistId,
+    size,
     listPrice,
     price,
   );
@@ -352,6 +368,7 @@ export async function finalizeOrder(
     console.log(
       `[checkout] order ${order.id} paid + submitted to Printful (#${printful.id}, ${printful.status})`,
     );
+    if (printful.cost != null) await recordPrintfulCost(order, printful.cost);
     return toStatus((updated as OrderRow) ?? { ...order, status: "submitted" });
   } catch (err) {
     // Payment IS captured — record the failure so fulfillment can be retried
@@ -366,4 +383,27 @@ export async function finalizeOrder(
       ? err
       : new HttpError(502, `Fulfillment failed: ${message}`);
   }
+}
+
+/**
+ * Log the real margin on a fulfilled order — Printful's actual bill (print,
+ * shipping to the customer's real address, tax) against what the customer
+ * paid — and store the bill on the order. The pricing table in pricing.ts is
+ * an estimate; this is the number to check it against. Best-effort: a
+ * missing `printful_cost` column (supabase/canvas-margin-guard.sql) never
+ * blocks fulfillment.
+ */
+async function recordPrintfulCost(order: OrderRow, cost: number): Promise<void> {
+  const net = order.price - cost - stripeFee(order.price);
+  const line =
+    `[margin] order ${order.id} (${order.size}): paid ${order.price}, ` +
+    `Printful ${cost}, Stripe ~${stripeFee(order.price)} → net ${net.toFixed(2)}`;
+  if (net < 0) console.error(`${line} — LOSS`);
+  else console.log(line);
+
+  const { error } = await supabaseAdmin()
+    .from("canvas_orders")
+    .update({ printful_cost: cost })
+    .eq("id", order.id);
+  if (error) console.warn(`[margin] could not store printful_cost: ${error.message}`);
 }

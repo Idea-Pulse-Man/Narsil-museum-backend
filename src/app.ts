@@ -8,21 +8,18 @@ import { apiRoutes } from "./routes/index.js";
 import { stripeWebhookHandler } from "./routes/stripeWebhook.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { apiLimiter } from "./middleware/rateLimit.js";
 
 /**
  * Decide whether a request's Origin is allowed. Requests with no Origin header
  * (curl, same-origin, server-to-server) are always allowed. Otherwise the origin
- * must be in the configured allow-list, or be a Vercel deployment (*.vercel.app)
- * so production and preview frontends work without reconfiguring the backend.
+ * must be in the allow-list — the app's own origins plus CORS_ORIGIN (see
+ * config/env.ts). Arbitrary *.vercel.app sites are deliberately not trusted:
+ * anyone can deploy one.
  */
 function isAllowedOrigin(origin: string): boolean {
   if (env.corsOrigin === "*") return true;
-  if (env.corsOrigin.includes(origin)) return true;
-  try {
-    return new URL(origin).hostname.endsWith(".vercel.app");
-  } catch {
-    return false;
-  }
+  return env.corsOrigin.includes(origin);
 }
 
 /**
@@ -31,6 +28,8 @@ function isAllowedOrigin(origin: string): boolean {
  */
 export function createApp(catalog: CatalogService = new CatalogService(env)): Express {
   const app = express();
+  // Behind CloudFront: resolve req.ip to the viewer, not the edge node.
+  app.set("trust proxy", env.trustProxy);
 
   app.use(
     cors({
@@ -59,7 +58,7 @@ export function createApp(catalog: CatalogService = new CatalogService(env)): Ex
   const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../public");
   app.use(express.static(publicDir));
 
-  app.use("/api", apiRoutes(catalog));
+  app.use("/api", apiLimiter, apiRoutes(catalog));
 
   app.use(notFound);
   app.use(errorHandler);

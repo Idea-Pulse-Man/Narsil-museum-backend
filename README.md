@@ -89,7 +89,7 @@ testing.
 | GET | `/api/artists` | List artists → `{ data, total }` |
 | GET | `/api/artists/:id` | Get one artist |
 | GET | `/api/image/:identifier` | Proxy/stream an IIIF 3.0 image (`?w=<px>`, `?full=1`) |
-| POST | `/api/refresh` | Drop the cache; next request rebuilds |
+| POST | `/api/refresh` | Drop the cache; next request rebuilds (admin only) |
 
 ## Image delivery
 

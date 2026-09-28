@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getArtistPhotoUrl } from "../museum/artistPhoto.js";
+import { artistPhotoLimiter } from "../middleware/rateLimit.js";
 
 /**
  * Artist portrait lookup — resolves a Wikidata portrait by name server-side.
@@ -10,7 +11,7 @@ import { getArtistPhotoUrl } from "../museum/artistPhoto.js";
 export function artistPhotoRoutes(): Router {
   const router = Router();
 
-  router.get("/", async (req, res, next) => {
+  router.get("/", artistPhotoLimiter, async (req, res, next) => {
     try {
       const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
       if (!name) {

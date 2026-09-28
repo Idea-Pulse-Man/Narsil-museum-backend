@@ -116,11 +116,12 @@ export interface PrintfulOrderInput {
 
 /**
  * Create the Printful order. Draft by default; PRINTFUL_CONFIRM_ORDERS=true
- * submits straight to fulfillment. Returns the Printful order id.
+ * submits straight to fulfillment. Returns the Printful order id and what
+ * Printful will bill us for it (print + shipping + tax), when it reports one.
  */
 export async function createPrintfulOrder(
   input: PrintfulOrderInput,
-): Promise<{ id: number; status: string }> {
+): Promise<{ id: number; status: string; cost: number | null }> {
   const variantId = await resolveVariantId(input.size);
   const confirm = env.printful.confirmOrders ? 1 : 0;
 
@@ -140,5 +141,42 @@ export async function createPrintfulOrder(
     }),
   });
   const result = await printfulJson(res);
-  return { id: result.id as number, status: String(result.status ?? "draft") };
+  const cost = Number(result.costs?.total);
+  return {
+    id: result.id as number,
+    status: String(result.status ?? "draft"),
+    cost: Number.isFinite(cost) && cost > 0 ? cost : null,
+  };
+}
+
+/** The parts of a Printful order the status webhook needs. */
+export interface PrintfulOrderStatus {
+  status: string;
+  shipments: {
+    carrier?: string;
+    tracking_number?: string;
+    tracking_url?: string;
+    ship_date?: string;
+  }[];
+}
+
+/**
+ * Read an order's live status from Printful by our external_id (the
+ * canvas_orders id). Returns null when Printful has no such order. Used by the
+ * webhook to confirm an event against the source of truth instead of trusting
+ * the payload.
+ */
+export async function getPrintfulOrder(
+  externalId: string,
+): Promise<PrintfulOrderStatus | null> {
+  const res = await fetch(
+    `${PRINTFUL_API}/orders/@${encodeURIComponent(externalId)}`,
+    { headers: headers() },
+  );
+  if (res.status === 404) return null;
+  const result = await printfulJson(res);
+  return {
+    status: String(result?.status ?? ""),
+    shipments: Array.isArray(result?.shipments) ? result.shipments : [],
+  };
 }

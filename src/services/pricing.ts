@@ -30,6 +30,16 @@
  *
  * A deterministic +$0 / +$5 / +$10 per-artwork offset still applies on top
  * of these bases (see `priceFromId`).
+ *
+ * Caveats (Sep 2026 re-check): the $10.39 shipping is the US first-item rate
+ * and is the same for every size — confirm the 24×36 figure against a real
+ * order. Checkout only accepts US addresses (services/recipient.ts). Non-US
+ * cards still cost Stripe +1.5%. The real Printful charge is logged per order
+ * at fulfillment (checkout.ts).
+ *
+ * Artist originals: the artist's share comes out of the margin above, so it
+ * is capped at MAX_ARTIST_SHARE_PCT. At 30% the small canvas still nets
+ * Narsil ~$5.50 — any higher and small prints lose money.
  */
 
 export type CanvasSize = "Small" | "Medium" | "Large";
@@ -42,6 +52,21 @@ export const CANVAS_SIZES: Record<
   Medium: { dimensions: '18 × 24"', price: 89 },
   Large: { dimensions: '24 × 36"', price: 129 },
 };
+
+/** Printful print cost + US first-item shipping per size (table above). */
+export const LANDED_COST: Record<CanvasSize, number> = {
+  Small: 33.8,
+  Medium: 44.05,
+  Large: 62.41,
+};
+
+/** Highest artist revenue share the server will honour, in percent. */
+export const MAX_ARTIST_SHARE_PCT = 30;
+
+/** Stripe's standard US card fee on a charge, in currency units. */
+export function stripeFee(amount: number): number {
+  return Math.round((amount * 0.029 + 0.3) * 100) / 100;
+}
 
 export function isCanvasSize(value: string): value is CanvasSize {
   return value in CANVAS_SIZES;
