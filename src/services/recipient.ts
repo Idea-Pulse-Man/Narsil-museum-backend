@@ -189,6 +189,11 @@ export function buildRecipient(
       'Unrecognised delivery country — use a 2-letter ISO code like "US" or "GB".',
     );
   }
+  // Canvas prints ship inside the US only: prices absorb US shipping, and
+  // overseas postage and card fees would eat the margin.
+  if (countryCode !== "US") {
+    throw new HttpError(400, "Canvas prints ship to US addresses only.");
+  }
 
   const stateCode = toStateCode(address.region ?? "", countryCode);
   if (countryCode in SUBDIVISIONS && !stateCode) {
