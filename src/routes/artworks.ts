@@ -134,7 +134,11 @@ export function artworkRoutes(catalog: CatalogService): Router {
 
   router.get("/:id", async (req, res, next) => {
     try {
-      const artwork = await catalog.getArtwork(req.params.id);
+      // Same lookup as /download and checkout: the live cache first, then
+      // the ingested catalog in Supabase.
+      const artwork =
+        (await catalog.getArtwork(req.params.id)) ??
+        (await getArtworkFromSupabase(req.params.id));
       if (!artwork) {
         res.status(404).json({
           error: "Not Found",

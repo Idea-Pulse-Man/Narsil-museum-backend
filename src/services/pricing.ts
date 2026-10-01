@@ -1,7 +1,8 @@
 /**
- * Server-side canvas pricing — a faithful mirror of the frontend's
- * `museum-app/src/data/shop.ts`, so the amount Stripe charges is always
- * computed here and never trusted from the client. Keep the two in sync.
+ * Server-side canvas pricing — the ONE place canvas prices are set. The
+ * amount Stripe charges is always computed here, and the app loads this
+ * table from GET /api/prices (routes/prices.ts) for display;
+ * `museum-app/src/data/shop.ts` only keeps a copy as an offline fallback.
  *
  * ---------------------------------------------------------------------------
  * How these prices were derived (re-run this math if Printful's rates move)
@@ -74,11 +75,18 @@ export function isCanvasSize(value: string): value is CanvasSize {
   return value in CANVAS_SIZES;
 }
 
-/** Deterministic per-artwork "from" price (same hash as the frontend). */
+/** Per-artwork price steps added on top of every size's base price. */
+export const PRICE_OFFSETS = [0, 5, 10];
+
+/**
+ * Deterministic per-artwork "from" price. The app reads CANVAS_SIZES and
+ * PRICE_OFFSETS from GET /api/prices and runs the same hash, so the prices it
+ * shows always come from this file.
+ */
 export function priceFromId(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i += 1) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return CANVAS_SIZES.Small.price + (h % 3) * 5;
+  return CANVAS_SIZES.Small.price + PRICE_OFFSETS[h % PRICE_OFFSETS.length];
 }
 
 /** Final list price in whole currency units for an artwork + size. */

@@ -350,8 +350,13 @@ export class CmaSource implements MuseumSource {
     );
   }
 
-  /** Trim long gallery descriptions to a short, card-friendly blurb. */
-  private concise(text: string, max = 240): string {
+  /**
+   * Sanity-cap very long descriptions. Deliberately generous (the placard UI
+   * clamps with "Read more") — the old 240-char cap cut real museum prose
+   * mid-sentence at ingest, losing the text permanently. Matches rijks.ts and
+   * wellcome.ts.
+   */
+  private concise(text: string, max = 900): string {
     const clean = text.replace(/\s+/g, " ").trim();
     if (clean.length <= max) return clean;
 

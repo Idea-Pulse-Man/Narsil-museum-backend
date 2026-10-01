@@ -32,6 +32,10 @@ import type { MuseumSource } from "../museum/source.js";
 import type { Artwork, Artist } from "../types/domain.js";
 import { S3ImageStore } from "./s3.js";
 import { SupabaseCatalogStore } from "./store.js";
+import {
+  generateAiDescription,
+  shouldGenerateAiDescription,
+} from "./aiDescription.js";
 
 /** S3 object key for an artwork image, e.g. "artworks/wc-abc.jpg". */
 function artworkKey(id: string): string {
@@ -266,6 +270,75 @@ async function download(
   throw lastErr;
 }
 
+/** Concurrent OpenAI calls — same gentle rate as the backfill job. */
+const AI_CONCURRENCY = 2;
+
+/**
+ * Give thin records from this run a generated placard (`ai_description`) —
+ * the same tier `backfill:descriptions` runs by hand over the whole table.
+ * Rows that already have one are never regenerated, and good museum prose
+ * never qualifies (see shouldGenerateAiDescription). A failure here is
+ * logged, never fatal: the catalog is already live by this step.
+ */
+async function describeNewArtworks(
+  artworks: Artwork[],
+  artists: Artist[],
+  store: SupabaseCatalogStore,
+): Promise<void> {
+  if (!env.openai.apiKey) {
+    console.log("     skipped — OPENAI_API_KEY is not set");
+    return;
+  }
+  try {
+    const missing = await store.idsWithoutAiDescription(artworks.map((a) => a.id));
+    const candidates = artworks.filter(
+      (a) => missing.has(a.id) && shouldGenerateAiDescription(a.description ?? ""),
+    );
+    if (candidates.length === 0) {
+      console.log("     none needed");
+      return;
+    }
+
+    const artistName = new Map(artists.map((a) => [a.id, a.name]));
+    let generated = 0;
+    let failed = 0;
+    await mapLimit(candidates, AI_CONCURRENCY, async (art) => {
+      const text = await generateAiDescription({
+        title: art.title,
+        artist: artistName.get(art.artistId) ?? "Unknown Artist",
+        medium: art.medium,
+        year: art.year,
+        museum: art.source,
+        tags: art.tags.slice(0, 6),
+        sourceText: art.description || undefined,
+      });
+      if (!text) {
+        failed++;
+        return;
+      }
+      try {
+        await store.setAiDescription(art.id, text);
+        generated++;
+      } catch (err) {
+        failed++;
+        console.warn(`  ✗ artwork ${art.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    });
+
+    console.log(`     generated=${generated} failed=${failed} (model ${env.openai.model})`);
+    if (generated === 0 && failed > 0) {
+      console.warn(
+        `     ⚠ every AI description failed — check OPENAI_API_KEY and ` +
+          `OPENAI_MODEL (${env.openai.model}).`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `     AI descriptions skipped: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
 /** Run `fn` over `items` with a fixed concurrency limit. */
 async function mapLimit<T, R>(
   items: T[],
@@ -440,6 +513,9 @@ async function main(): Promise<void> {
     }
   }
   writeState(nextState);
+
+  console.log("4/4 AI descriptions for thin new records…");
+  await describeNewArtworks(ready, finalArtists, store);
 
   const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.log(

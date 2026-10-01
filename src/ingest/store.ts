@@ -97,4 +97,30 @@ export class SupabaseCatalogStore {
       if (error) throw new Error(`Supabase artworks upsert failed: ${error.message}`);
     }
   }
+
+  /** Of these artwork ids, the ones that have no AI description yet. */
+  async idsWithoutAiDescription(ids: string[]): Promise<Set<string>> {
+    const missing = new Set<string>();
+    // Small chunks keep the `in (...)` filter well under URL length limits.
+    for (const batch of chunk(ids, 100)) {
+      const { data, error } = await this.client
+        .from("artworks")
+        .select("id")
+        .in("id", batch)
+        .is("ai_description", null);
+      if (error) {
+        throw new Error(`Supabase ai_description lookup failed: ${error.message}`);
+      }
+      for (const row of data ?? []) missing.add(row.id as string);
+    }
+    return missing;
+  }
+
+  async setAiDescription(id: string, text: string): Promise<void> {
+    const { error } = await this.client
+      .from("artworks")
+      .update({ ai_description: text })
+      .eq("id", id);
+    if (error) throw new Error(`Supabase ai_description update failed: ${error.message}`);
+  }
 }
