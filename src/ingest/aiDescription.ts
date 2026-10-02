@@ -84,8 +84,13 @@ const META_RE =
 const wordCount = (text: string): number =>
   text.split(/\s+/).filter(Boolean).length;
 
+/** Abbreviations whose full stop doesn't end a sentence ("St. Louis",
+ *  "ca. 1815"), and single initials ("J. C. Wild"). */
+const ABBREVIATION_RE =
+  /\b(?:St|Ste|ca|c|Mr|Mrs|Ms|Dr|Jr|Sr|No|Nos|vol|fig|inv|cat|ed|eds|op|vs|etc)\.(?=\s)|\b[A-Z]\.(?=\s)/g;
+
 const sentenceCount = (text: string): number =>
-  (text.match(/[.!?](\s|$)/g) ?? []).length || 1;
+  (text.replace(ABBREVIATION_RE, "").match(/[.!?](\s|$)/g) ?? []).length || 1;
 
 /**
  * Clean and validate a candidate. Returns the cleaned text, or the reason it
