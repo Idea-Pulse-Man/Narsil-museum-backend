@@ -162,7 +162,14 @@ last month's:
 0 3 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) ===" && npm run ingest' >> ~/ingest-cron.log 2>&1
 0 6 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) artist-profiles ===" && npm run ingest:artists:prod -- --limit=50' >> ~/artist-profiles-cron.log 2>&1
 15 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) daily-quiz ===" && npm run quiz:daily:prod' >> ~/daily-quiz-cron.log 2>&1
+0 13 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) push-quiz ===" && npm run push:daily:prod -- --quiz' >> ~/push-cron.log 2>&1
+0 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) push-streak ===" && npm run push:daily:prod -- --streak' >> ~/push-cron.log 2>&1
 ```
+
+> Push reminders (times are UTC, the server's clock): **13:00** "Today's Royal
+> Assessment is ready" (9 am New York), and **00:00** "Your streak ends tonight"
+> (8 pm New York, before the UTC quiz day rolls over). Both skip quietly until
+> `APNS_KEY`, `APNS_KEY_ID` and `APPLE_TEAM_ID` are set.
 
 > Avoid `%` anywhere in a crontab command — cron turns it into a newline.
 > `date -Is` sidesteps that; `date +%F` would break the line.

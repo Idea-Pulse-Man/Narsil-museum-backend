@@ -7,6 +7,8 @@
  *     so it stays idempotent against the Stripe webhook.
  *   GET  /api/admin/orders/:id       — fulfilment status for any order.
  *   POST /api/admin/quiz/generate    — OpenAI MCQs grounded in catalog works.
+ *   GET  /api/admin/printful/drafts  — Printful orders waiting to be confirmed
+ *     (paid orders arrive as drafts while PRINTFUL_CONFIRM_ORDERS is off).
  *
  * Everything else the dashboard does (listing, flags, roles, suspensions) goes
  * straight to Supabase under RLS — only work needing server secrets (Stripe,
@@ -17,6 +19,7 @@ import type { CatalogService } from "../museum/catalog.js";
 import { requireAdmin } from "../middleware/auth.js";
 import { finalizeOrder, getOrderStatus } from "../services/checkout.js";
 import { generateQuizQuestions } from "../services/quizGenerate.js";
+import { listPrintfulDrafts } from "../services/printful.js";
 
 export function adminRoutes(catalog: CatalogService): Router {
   const router = Router();
@@ -26,6 +29,15 @@ export function adminRoutes(catalog: CatalogService): Router {
     try {
       // No userId — an admin acts on any buyer's order.
       res.json(await finalizeOrder(catalog, req.params.id));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/printful/drafts", async (_req, res, next) => {
+    try {
+      const drafts = await listPrintfulDrafts();
+      res.json({ count: drafts.length, drafts });
     } catch (err) {
       next(err);
     }

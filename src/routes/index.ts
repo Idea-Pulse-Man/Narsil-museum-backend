@@ -10,6 +10,7 @@ import { printfulWebhookRoutes } from "./printfulWebhook.js";
 import { appleRoutes } from "./apple.js";
 import { meRoutes } from "./me.js";
 import { priceRoutes } from "./prices.js";
+import { telemetryRoutes } from "./telemetry.js";
 import { requireAdmin } from "../middleware/auth.js";
 
 /** Mounts all `/api/*` routes onto a single router. */
@@ -32,6 +33,7 @@ export function apiRoutes(catalog: CatalogService): Router {
   router.use("/artist-photo", artistPhotoRoutes());
   router.use("/image", imageRoutes(catalog.iiif));
   router.use("/prices", priceRoutes());
+  router.use("/telemetry", telemetryRoutes());
   router.use("/checkout", checkoutRoutes(catalog));
   router.use("/admin", adminRoutes(catalog));
   router.use("/printful", printfulWebhookRoutes());

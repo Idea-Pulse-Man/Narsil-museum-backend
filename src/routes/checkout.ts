@@ -20,14 +20,15 @@ import {
 
 export function checkoutRoutes(catalog: CatalogService): Router {
   const router = Router();
-  router.use(requireUserFor("Sign in to order a canvas."));
+  router.use(requireUserFor("Sign in to order a print."));
 
   router.post("/payment-intent", async (req, res, next) => {
     try {
-      const { artworkId, size, addressId } = (req.body ?? {}) as {
+      const { artworkId, size, addressId, product } = (req.body ?? {}) as {
         artworkId?: string;
         size?: string;
         addressId?: string;
+        product?: string;
       };
       if (!artworkId || !size || !addressId) {
         res.status(400).json({
@@ -40,6 +41,7 @@ export function checkoutRoutes(catalog: CatalogService): Router {
         artworkId,
         size,
         addressId,
+        product,
       });
       res.json(intent);
     } catch (err) {

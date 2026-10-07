@@ -1,24 +1,54 @@
 import { Router } from "express";
-import { CANVAS_SIZES, PRICE_OFFSETS, type CanvasSize } from "../services/pricing.js";
+import {
+  ARTIST_ORIGINAL_PRICES,
+  CANVAS_SIZES,
+  PRICE_OFFSETS,
+  PRODUCTS,
+  type CanvasSize,
+  type ProductType,
+} from "../services/pricing.js";
+
+const SIZES = Object.keys(CANVAS_SIZES) as CanvasSize[];
 
 /**
- * GET /api/prices — the canvas price table the app displays. Public, and the
+ * GET /api/prices — the print price tables the app displays. Public, and the
  * same numbers checkout charges (services/pricing.ts), so the size picker can
  * never show a different price than the one the customer pays.
  *
- * → { sizes: [{ size, dimensions, price }], offsets: [0, 5, 10] }
+ * → {
+ *     sizes: [...canvas sizes],          // kept for older app builds
+ *     offsets: [0, 5, 10],
+ *     products: { canvas: { label, artistOriginals, sizes: [...] }, poster: {...} },
+ *     artistOriginal: { canvas: { Small: 69 } }
+ *   }
  */
 export function priceRoutes(): Router {
   const router = Router();
 
   router.get("/", (_req, res) => {
-    const sizes = (Object.keys(CANVAS_SIZES) as CanvasSize[]).map((size) => ({
-      size,
-      dimensions: CANVAS_SIZES[size].dimensions,
-      price: CANVAS_SIZES[size].price,
-    }));
+    const sizesOf = (product: ProductType) =>
+      SIZES.map((size) => ({
+        size,
+        dimensions: PRODUCTS[product].sizes[size].dimensions,
+        price: PRODUCTS[product].sizes[size].price,
+      }));
+    const products = Object.fromEntries(
+      (Object.keys(PRODUCTS) as ProductType[]).map((product) => [
+        product,
+        {
+          label: PRODUCTS[product].label,
+          artistOriginals: PRODUCTS[product].artistOriginals,
+          sizes: sizesOf(product),
+        },
+      ]),
+    );
     res.setHeader("Cache-Control", "public, max-age=300");
-    res.json({ sizes, offsets: PRICE_OFFSETS });
+    res.json({
+      sizes: sizesOf("canvas"),
+      offsets: PRICE_OFFSETS,
+      products,
+      artistOriginal: { canvas: ARTIST_ORIGINAL_PRICES },
+    });
   });
 
   return router;

@@ -20,6 +20,8 @@
     "ingest:artists:prod": "node dist/src/ingest/artistProfiles.js",
     "quiz:daily": "tsx src/ingest/dailyQuiz.ts",
     "quiz:daily:prod": "node dist/src/ingest/dailyQuiz.js",
+    "push:daily": "tsx src/ingest/pushDaily.ts",
+    "push:daily:prod": "node dist/src/ingest/pushDaily.js",
     "backfill:descriptions": "tsx src/ingest/backfillDescriptions.ts",
     "backfill:descriptions:prod": "node dist/src/ingest/backfillDescriptions.js",
     "typecheck": "tsc -p tsconfig.test.json",

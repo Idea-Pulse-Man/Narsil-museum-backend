@@ -178,6 +178,30 @@ export const env = {
     `http://localhost:${num(process.env.PORT, 4000)}`
   ).replace(/\/$/, ""),
 
+  /**
+   * The public web app — where shared artwork links (`/share/:id`) send
+   * people who don't have the iPhone app.
+   */
+  webAppUrl: (process.env.WEB_APP_URL ?? "https://narsil-app-frontend.vercel.app").replace(
+    /\/$/,
+    "",
+  ),
+
+  /**
+   * Apple Push Notification service (iPhone notifications). A .p8 key with
+   * the APNs capability (Apple Developer → Keys). While any value is unset,
+   * notifications are skipped silently. APNS_ENVIRONMENT=sandbox for Xcode /
+   * TestFlight-from-Xcode builds, production (default) for App Store and
+   * TestFlight builds.
+   */
+  apns: {
+    key: (process.env.APNS_KEY ?? "").replace(/\\n/g, "\n"),
+    keyId: process.env.APNS_KEY_ID ?? "",
+    teamId: process.env.APPLE_TEAM_ID ?? "",
+    bundleId: process.env.APPLE_BUNDLE_ID ?? "com.narsil.museum",
+    sandbox: process.env.APNS_ENVIRONMENT === "sandbox",
+  },
+
   /** How artwork images reach the frontend: "proxy" (default) or "direct". */
   imageDelivery: imageDelivery as "proxy" | "direct",
 
@@ -274,6 +298,8 @@ export const env = {
     confirmOrders: process.env.PRINTFUL_CONFIRM_ORDERS === "true",
     /** Printful catalog product used for canvas prints (3 = Canvas (in)). */
     canvasProductId: num(process.env.PRINTFUL_CANVAS_PRODUCT_ID, 3),
+    /** Printful catalog product for posters (1 = Enhanced Matte Paper Poster (in)). */
+    posterProductId: num(process.env.PRINTFUL_POSTER_PRODUCT_ID, 1),
     /**
      * Optional explicit catalog variant ids per app size. When unset, the
      * variant is discovered from the Printful catalog by matching the size

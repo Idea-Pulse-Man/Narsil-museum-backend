@@ -572,10 +572,13 @@ export class MetSource implements MuseumSource {
       medium || record.objectName?.trim() || this.titleOf(record);
     lead = lead.charAt(0).toUpperCase() + lead.slice(1);
     if (artist !== "Unknown Artist") lead += ` by ${artist}`;
+    // Culture reads as part of the placard line ("…, Japanese, ca. 1830"),
+    // not as a labelled field ("Culture: Japanese.").
+    if (record.culture?.trim()) lead += `, ${record.culture.trim()}`;
     if (date) lead += `, ${date}`;
 
-    const sentences = [`${lead}.`];
-    if (record.culture) sentences.push(`Culture: ${record.culture.trim()}.`);
+    // "n.d." already ends in a full stop — don't print "n.d..".
+    const sentences = [`${lead.replace(/\.$/, "")}.`];
     if (record.department) {
       sentences.push(`${record.department.trim()}, The Met, New York.`);
     }

@@ -5,7 +5,7 @@
  */
 import { env } from "../config/env.js";
 import { HttpError } from "../utils/httpError.js";
-import { CANVAS_SIZES, type CanvasSize } from "./pricing.js";
+import { CANVAS_SIZES, type CanvasSize, type ProductType } from "./pricing.js";
 
 const PRINTFUL_API = "https://api.printful.com";
 
@@ -57,52 +57,65 @@ function normalizeDimensions(value: string): string | null {
   return match ? `${match[1]}x${match[2]}` : null;
 }
 
-let variantCache: Record<CanvasSize, number> | null = null;
+/** Printful catalog product per app product. Canvas is configurable. */
+function printfulProductId(product: ProductType): number {
+  return product === "canvas" ? env.printful.canvasProductId : env.printful.posterProductId;
+}
+
+/** Variant ids per product, refreshed daily so catalog changes need no restart. */
+const VARIANT_TTL_MS = 24 * 60 * 60 * 1000;
+const variantCache = new Map<ProductType, { ids: Record<CanvasSize, number>; at: number }>();
 
 /**
- * Resolve the Printful catalog variant id for each canvas size — explicit env
- * overrides first, otherwise discovered once from the catalog product by
- * matching the variant's size string against the app's dimensions.
+ * Resolve the Printful catalog variant id for a product + size — explicit env
+ * overrides first (canvas only), otherwise discovered from the catalog
+ * product by matching the variant's size string against the app's dimensions.
  */
-export async function resolveVariantId(size: CanvasSize): Promise<number> {
-  const override = env.printful.variantIds[size];
-  if (override) return override;
-
-  if (!variantCache) {
-    const res = await fetch(
-      `${PRINTFUL_API}/products/${env.printful.canvasProductId}`,
-    );
-    const result = await printfulJson(res);
-    const variants: Array<{ id: number; size?: string; name?: string }> =
-      result?.variants ?? [];
-
-    const bySize = new Map<string, number>();
-    for (const variant of variants) {
-      const dims = normalizeDimensions(variant.size ?? variant.name ?? "");
-      if (dims && !bySize.has(dims)) bySize.set(dims, variant.id);
-    }
-
-    const resolved = {} as Record<CanvasSize, number>;
-    for (const key of Object.keys(SIZE_DIMENSIONS) as CanvasSize[]) {
-      const id = env.printful.variantIds[key] ?? bySize.get(SIZE_DIMENSIONS[key]);
-      if (!id) {
-        throw new HttpError(
-          503,
-          `Printful product ${env.printful.canvasProductId} has no ` +
-            `${SIZE_DIMENSIONS[key]} variant for size "${key}" — set ` +
-            `PRINTFUL_VARIANT_${key.toUpperCase()}.`,
-        );
-      }
-      resolved[key] = id;
-    }
-    variantCache = resolved;
-    console.log(
-      `[printful] canvas variants: ${CANVAS_SIZES.Small.dimensions}=${resolved.Small}, ` +
-        `${CANVAS_SIZES.Medium.dimensions}=${resolved.Medium}, ` +
-        `${CANVAS_SIZES.Large.dimensions}=${resolved.Large}`,
-    );
+export async function resolveVariantId(
+  size: CanvasSize,
+  product: ProductType = "canvas",
+): Promise<number> {
+  if (product === "canvas") {
+    const override = env.printful.variantIds[size];
+    if (override) return override;
   }
-  return variantCache[size];
+
+  const cached = variantCache.get(product);
+  if (cached && Date.now() - cached.at < VARIANT_TTL_MS) return cached.ids[size];
+
+  const productId = printfulProductId(product);
+  const res = await fetch(`${PRINTFUL_API}/products/${productId}`);
+  const result = await printfulJson(res);
+  const variants: Array<{ id: number; size?: string; name?: string }> =
+    result?.variants ?? [];
+
+  const bySize = new Map<string, number>();
+  for (const variant of variants) {
+    const dims = normalizeDimensions(variant.size ?? variant.name ?? "");
+    if (dims && !bySize.has(dims)) bySize.set(dims, variant.id);
+  }
+
+  const resolved = {} as Record<CanvasSize, number>;
+  for (const key of Object.keys(SIZE_DIMENSIONS) as CanvasSize[]) {
+    const id =
+      (product === "canvas" ? env.printful.variantIds[key] : null) ??
+      bySize.get(SIZE_DIMENSIONS[key]);
+    if (!id) {
+      throw new HttpError(
+        503,
+        `Printful product ${productId} has no ${SIZE_DIMENSIONS[key]} variant ` +
+          `for ${product} size "${key}".`,
+      );
+    }
+    resolved[key] = id;
+  }
+  variantCache.set(product, { ids: resolved, at: Date.now() });
+  console.log(
+    `[printful] ${product} variants: ${CANVAS_SIZES.Small.dimensions}=${resolved.Small}, ` +
+      `${CANVAS_SIZES.Medium.dimensions}=${resolved.Medium}, ` +
+      `${CANVAS_SIZES.Large.dimensions}=${resolved.Large}`,
+  );
+  return resolved[size];
 }
 
 export interface PrintfulOrderInput {
@@ -110,6 +123,7 @@ export interface PrintfulOrderInput {
   externalId: string;
   recipient: PrintfulRecipient;
   size: CanvasSize;
+  product: ProductType;
   /** Publicly fetchable print file (the artwork image). */
   imageUrl: string;
 }
@@ -122,7 +136,7 @@ export interface PrintfulOrderInput {
 export async function createPrintfulOrder(
   input: PrintfulOrderInput,
 ): Promise<{ id: number; status: string; cost: number | null }> {
-  const variantId = await resolveVariantId(input.size);
+  const variantId = await resolveVariantId(input.size, input.product);
   const confirm = env.printful.confirmOrders ? 1 : 0;
 
   const res = await fetch(`${PRINTFUL_API}/orders?confirm=${confirm}`, {
@@ -179,4 +193,38 @@ export async function getPrintfulOrder(
     status: String(result?.status ?? ""),
     shipments: Array.isArray(result?.shipments) ? result.shipments : [],
   };
+}
+
+/** A Printful order waiting for someone to confirm it in the dashboard. */
+export interface PrintfulDraft {
+  printfulId: number;
+  /** Our canvas_orders id, when the order came from checkout. */
+  orderId: string | null;
+  createdAt: string;
+  /** What Printful will bill on confirmation, when it has priced it. */
+  cost: number | null;
+  city: string | null;
+}
+
+/**
+ * Orders still in Printful's `draft` state. With PRINTFUL_CONFIRM_ORDERS
+ * off, every paid order lands here and nothing ships until it's confirmed,
+ * so the admin dashboard polls this to raise an alert.
+ */
+export async function listPrintfulDrafts(): Promise<PrintfulDraft[]> {
+  const res = await fetch(`${PRINTFUL_API}/orders?status=draft&limit=100`, {
+    headers: headers(),
+  });
+  const result = (await printfulJson(res)) as unknown;
+  const rows = Array.isArray(result) ? (result as Record<string, any>[]) : [];
+  return rows.map((o) => {
+    const cost = Number(o.costs?.total);
+    return {
+      printfulId: Number(o.id),
+      orderId: typeof o.external_id === "string" ? o.external_id : null,
+      createdAt: new Date(Number(o.created) * 1000).toISOString(),
+      cost: Number.isFinite(cost) && cost > 0 ? cost : null,
+      city: typeof o.recipient?.city === "string" ? o.recipient.city : null,
+    };
+  });
 }

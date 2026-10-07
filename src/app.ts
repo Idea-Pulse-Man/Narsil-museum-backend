@@ -9,6 +9,7 @@ import { stripeWebhookHandler } from "./routes/stripeWebhook.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { apiLimiter } from "./middleware/rateLimit.js";
+import { shareRoutes } from "./routes/share.js";
 
 /**
  * Decide whether a request's Origin is allowed. Requests with no Origin header
@@ -59,6 +60,10 @@ export function createApp(catalog: CatalogService = new CatalogService(env)): Ex
   app.use(express.static(publicDir));
 
   app.use("/api", apiLimiter, apiRoutes(catalog));
+  // Shared artwork links + Universal Links file (outside /api: these URLs
+  // are what people see and tap).
+  app.use("/share", apiLimiter);
+  app.use(shareRoutes());
 
   app.use(notFound);
   app.use(errorHandler);

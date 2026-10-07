@@ -23,6 +23,7 @@ import { Router, type Request } from "express";
 import { env } from "../config/env.js";
 import { supabaseAdmin } from "../services/supabaseAdmin.js";
 import { getPrintfulOrder } from "../services/printful.js";
+import { notifyUsers } from "../services/push.js";
 
 interface PrintfulEvent {
   type?: string;
@@ -125,16 +126,26 @@ export function printfulWebhookRoutes(): Router {
       }
 
       if (update) {
-        const { error } = await supabaseAdmin()
+        const { data: updated, error } = await supabaseAdmin()
           .from("canvas_orders")
           .update(update)
-          .eq("id", orderId);
+          .eq("id", orderId)
+          .select("user_id, status")
+          .maybeSingle();
         if (error) {
           console.error(
             `[printful] webhook update for order ${orderId} failed: ${error.message}`,
           );
         } else {
           console.log(`[printful] order ${orderId}: ${event.type}`);
+          const buyer = (updated as { user_id?: string | null } | null)?.user_id;
+          if (buyer && event.type === "package_shipped") {
+            void notifyUsers([buyer], {
+              title: "Your print has shipped",
+              body: "It's on its way — tap to see tracking.",
+              data: { type: "orders" },
+            });
+          }
         }
       }
 

@@ -64,10 +64,12 @@ export function composeWallText(input: WallTextInput): string {
   if (lead) lead = lead.charAt(0).toUpperCase() + lead.slice(1);
   if (artist) lead = lead ? `${lead} by ${artist}` : `A work by ${artist}`;
   if (!lead) return "";
+  // "Oil on canvas by X, Dutch, 1858." — culture in the placard line, not a
+  // labelled "Culture: Dutch." sentence that reads like a field dump.
+  if (culture) lead += `, ${culture}`;
   if (year) lead += `, ${year}`;
 
-  const sentences = [`${lead}.`];
-  if (culture) sentences.push(`Culture: ${culture}.`);
+  const sentences = [`${lead.replace(/\.$/, "")}.`];
   if (museum) sentences.push(`${museum}.`);
   return sentences.join(" ");
 }

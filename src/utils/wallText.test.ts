@@ -26,3 +26,11 @@ describe("composeWallText", () => {
     );
   });
 });
+
+describe("composeWallText culture", () => {
+  it("puts culture in the placard line, not a labelled field", () => {
+    expect(
+      composeWallText({ artistName: "Rembrandt", medium: "etching", culture: "Dutch", yearLabel: "1650" }),
+    ).toBe("Etching by Rembrandt, Dutch, 1650.");
+  });
+});

@@ -21,15 +21,19 @@ import { supabaseAdmin } from "./supabaseAdmin.js";
 import { getStripe } from "./stripe.js";
 import {
   isCanvasSize,
-  LANDED_COST,
+  isProductType,
   MAX_ARTIST_SHARE_PCT,
   priceForSize,
+  productAllowed,
+  PRODUCTS,
   stripeFee,
   type CanvasSize,
+  type ProductType,
 } from "./pricing.js";
 import { buildRecipient, type AddressRow } from "./recipient.js";
 import { createPrintfulOrder, resolveVariantId } from "./printful.js";
 import { assertCanvasSellable } from "./sellability.js";
+import { notifyAdmins } from "./push.js";
 
 export interface AuthedUser {
   id: string;
@@ -40,6 +44,8 @@ export interface CheckoutInput {
   artworkId: string;
   size: string;
   addressId: string;
+  /** "canvas" (default — older app builds don't send it) or "poster". */
+  product?: string;
 }
 
 export interface CheckoutIntent {
@@ -60,6 +66,8 @@ interface OrderRow {
   user_id: string;
   artwork_id: string;
   size: string;
+  /** Missing on databases without supabase/posters.sql — means canvas. */
+  product?: string | null;
   price: number;
   status: string;
   address_id: string | null;
@@ -67,8 +75,12 @@ interface OrderRow {
   printful_order_id: string | null;
 }
 
-const ORDER_COLUMNS =
-  "id, user_id, artwork_id, size, price, status, address_id, stripe_payment_intent_id, printful_order_id";
+// `*` rather than a column list so a database without the `product` column
+// (supabase/posters.sql not run yet) keeps working for canvas orders.
+const ORDER_COLUMNS = "*";
+
+const productOf = (order: OrderRow): ProductType =>
+  order.product && isProductType(order.product) ? order.product : "canvas";
 
 const ADDRESS_COLUMNS =
   "id, label, recipient_name, phone, line1, line2, city, region, postal_code, country";
@@ -108,6 +120,7 @@ async function loadArtwork(catalog: CatalogService, artworkId: string) {
 async function revenueSplit(
   origin: string,
   artistId: string,
+  product: ProductType,
   size: CanvasSize,
   listPrice: number,
   paidPrice: number,
@@ -131,7 +144,7 @@ async function revenueSplit(
   const platformCut = Math.round((paidPrice - artistCut) * 100) / 100;
 
   // platform_cut is gross; Printful and Stripe still come out of it.
-  const net = platformCut - LANDED_COST[size] - stripeFee(paidPrice);
+  const net = platformCut - PRODUCTS[product].landedCost[size] - stripeFee(paidPrice);
   if (net < 0) {
     console.error(
       `[checkout] artist ${artistId} at ${pct}% leaves Narsil ` +
@@ -163,19 +176,27 @@ export async function createCheckout(
   const stripe = getStripe(); // 503s early when Stripe is unconfigured
 
   const size: CanvasSize = input.size;
+  const product = input.product ?? "canvas";
+  if (!isProductType(product)) {
+    throw new HttpError(400, `Unknown product "${product}".`);
+  }
   await assertCanvasSellable(input.artworkId);
   const artwork = await loadArtwork(catalog, input.artworkId);
+  if (!productAllowed(product, artwork.origin)) {
+    throw new HttpError(400, `This artwork isn't available as a ${product}.`);
+  }
   const address = await loadAddress(input.addressId, user.id);
   buildRecipient(address, user.email); // validate deliverability before paying
-  await resolveVariantId(size); // validate the Printful variant exists
+  await resolveVariantId(size, product); // validate the Printful variant exists
 
-  const listPrice = priceForSize(artwork.id, size);
+  const listPrice = priceForSize(artwork.id, size, product, artwork.origin);
   const price = listPrice;
   const discountPct = 0;
 
   const { artistCut, platformCut } = await revenueSplit(
     artwork.origin,
     artwork.artistId,
+    product,
     size,
     listPrice,
     price,
@@ -193,6 +214,9 @@ export async function createCheckout(
       status: "pending_payment",
       address_id: address.id,
       currency: env.checkout.currency,
+      // Only written for posters, so canvas checkout keeps working on a
+      // database where supabase/posters.sql hasn't been run yet.
+      ...(product !== "canvas" ? { product } : {}),
       ...(artistCut != null ? { artist_cut: artistCut } : {}),
       ...(platformCut != null ? { platform_cut: platformCut } : {}),
     })
@@ -210,13 +234,14 @@ export async function createCheckout(
       currency: env.checkout.currency,
       automatic_payment_methods: { enabled: true },
       description:
-        `Narsil canvas — ${artwork.title} (${size})` +
+        `Narsil ${product} — ${artwork.title} (${size})` +
         (discountPct ? ` — Pro ${discountPct}% off` : ""),
       ...(user.email ? { receipt_email: user.email } : {}),
       metadata: {
         order_id: order.id,
         artwork_id: artwork.id,
         size,
+        product,
         user_id: user.id,
         list_price: String(listPrice),
         discount_pct: String(discountPct),
@@ -342,9 +367,7 @@ export async function finalizeOrder(
       throw new HttpError(409, "This order has no delivery address.");
     }
     const address = await loadAddress(order.address_id, order.user_id);
-    const email =
-      intent.receipt_email ?? intent.metadata?.email ?? undefined;
-    const recipient = buildRecipient(address, email ?? undefined);
+    const recipient = buildRecipient(address, intent.receipt_email ?? undefined);
 
     await assertCanvasSellable(order.artwork_id);
     const artwork = await loadArtwork(catalog, order.artwork_id);
@@ -363,6 +386,7 @@ export async function finalizeOrder(
       externalId: order.id,
       recipient,
       size: order.size as CanvasSize,
+      product: productOf(order),
       imageUrl,
     });
 
@@ -381,6 +405,14 @@ export async function finalizeOrder(
       `[checkout] order ${order.id} paid + submitted to Printful (#${printful.id}, ${printful.status})`,
     );
     if (printful.cost != null) await recordPrintfulCost(order, printful.cost);
+    // Orders wait in Printful as drafts until someone confirms them.
+    void notifyAdmins({
+      title: "New paid order",
+      body:
+        `${order.size} ${productOf(order)} · $${order.price}` +
+        (env.printful.confirmOrders ? " — sent to Printful." : " — confirm it in Printful."),
+      data: { type: "admin_orders" },
+    });
     return toStatus((updated as OrderRow) ?? { ...order, status: "submitted" });
   } catch (err) {
     // Payment IS captured — record the failure so fulfillment can be retried
@@ -408,7 +440,7 @@ export async function finalizeOrder(
 async function recordPrintfulCost(order: OrderRow, cost: number): Promise<void> {
   const net = order.price - cost - stripeFee(order.price);
   const line =
-    `[margin] order ${order.id} (${order.size}): paid ${order.price}, ` +
+    `[margin] order ${order.id} (${productOf(order)} ${order.size}): paid ${order.price}, ` +
     `Printful ${cost}, Stripe ~${stripeFee(order.price)} → net ${net.toFixed(2)}`;
   if (net < 0) console.error(`${line} — LOSS`);
   else console.log(line);
