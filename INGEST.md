@@ -11,7 +11,9 @@ Every scheduled job runs from cron on the EC2 box (times are UTC, the server's c
 | Push: quiz | `npm run push:daily:prod -- --quiz` | 13:00 | "Today's Royal Assessment is ready" |
 | Push: streak | `npm run push:daily:prod -- --streak` | 00:00 | "Your streak ends tonight" |
 
-The exact crontab lines are in [Schedule it daily](#schedule-it-daily-cron).
+The exact crontab lines are in [Schedule it daily](#schedule-it-daily-cron). Log locations and
+what to do when a job fails: [docs/runbook.md](docs/runbook.md). How the question engine
+works: [docs/quiz-engine.md](docs/quiz-engine.md).
 
 ## Artwork ingest
 

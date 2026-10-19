@@ -10,6 +10,8 @@ It does four jobs:
 
 Built with Node.js 22, Express and TypeScript.
 
+**More docs:** [INGEST.md](INGEST.md) (cron jobs on EC2) · [docs/runbook.md](docs/runbook.md) (deploy, logs, fixing production) · [docs/quiz-engine.md](docs/quiz-engine.md) (question engine, adding a style) · [CHANGELOG.md](CHANGELOG.md)
+
 ## Quick start
 
 ```bash
@@ -108,7 +110,8 @@ break. `TRUST_PROXY=1` (the default) makes rate limits use the visitor's IP rath
 CloudFront's.
 
 **Deploying:** on the server, run `cd ~/narsil-museum-backend && npm run deploy`. A plain `git pull` is
-not enough, because pm2 runs the compiled `dist/`.
+not enough, because pm2 runs the compiled `dist/`. Rollback, health checks, log locations and fixes for
+common failures are in [docs/runbook.md](docs/runbook.md).
 
 **Reminder:** the Printful API token (`PRINTFUL_API_KEY`, "Narsil-printful") expires on
 **2027-01-23**. Replace it before then (scopes: Orders, Orders/read), or every canvas order fails.
@@ -160,7 +163,8 @@ src/
 │                          # enrichArtistWiki, dailyQuiz, quizGenerate, pushDaily,
 │                          # backfillDescriptions, aiDescription (+ s3, store helpers)
 ├── quiz/                  # Question engine: catalog loader, 27 style builders
-│                          # (styles/), validator, scoring, generate (cron + admin)
+│                          # (styles/), validator, scoring, generate (cron + admin);
+│                          # guide in docs/quiz-engine.md
 ├── types/domain.ts        # Artwork / Artist (mirror the app's types)
 └── utils/                 # http, cache, wall text, image download helpers
 ```
