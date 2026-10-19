@@ -1,4 +1,21 @@
-# Daily image ingestion — EC2 setup
+# Daily jobs on EC2 — ingest, artist profiles, quiz, push
+
+Every scheduled job runs from cron on the EC2 box (times are UTC, the server's clock):
+
+| Job | Command (cron) | When | What it writes |
+|---|---|---|---|
+| Artwork ingest | `npm run ingest` | 03:00 | S3 images + `artworks` / `artists` rows |
+| Artist profiles | `npm run ingest:artists:prod -- --limit=50` | 06:00 | `profile_ready` + `fyp_artist_cards` |
+| Question engine | `npm run quiz:generate:prod` | 00:10 | `quiz_items` + today's `daily_quiz_items` |
+| Daily quiz (classic) | `npm run quiz:daily:prod` | 00:15 | `daily_quizzes` / `daily_quiz_questions` (older app versions) |
+| Push: quiz | `npm run push:daily:prod -- --quiz` | 13:00 | "Today's Royal Assessment is ready" |
+| Push: streak | `npm run push:daily:prod -- --streak` | 00:00 | "Your streak ends tonight" |
+
+The exact crontab lines are in [Schedule it daily](#schedule-it-daily-cron). Log locations and
+what to do when a job fails: [docs/runbook.md](docs/runbook.md). How the question engine
+works: [docs/quiz-engine.md](docs/quiz-engine.md).
+
+## Artwork ingest
 
 The ingestion job pulls public-domain artworks from a museum API, uploads the
 images to **S3** (`narsil-backend-images`), and upserts artworks + artists into
@@ -162,6 +179,7 @@ last month's:
 0 3 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) ===" && npm run ingest' >> ~/ingest-cron.log 2>&1
 0 6 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) artist-profiles ===" && npm run ingest:artists:prod -- --limit=50' >> ~/artist-profiles-cron.log 2>&1
 15 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) daily-quiz ===" && npm run quiz:daily:prod' >> ~/daily-quiz-cron.log 2>&1
+10 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) quiz-generate ===" && npm run quiz:generate:prod' >> ~/quiz-generate-cron.log 2>&1
 0 13 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) push-quiz ===" && npm run push:daily:prod -- --quiz' >> ~/push-cron.log 2>&1
 0 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) push-streak ===" && npm run push:daily:prod -- --streak' >> ~/push-cron.log 2>&1
 ```
@@ -181,7 +199,17 @@ last month's:
 > The daily quiz runs at **00:15 UTC** (`quiz:daily:prod`). It writes that UTC
 > day's Royal Assessment into Supabase (10 questions) and skips a day an admin
 > has locked. Run `museum-app/supabase/daily-quiz.sql` once before the first
-> night. Admin specials are never deleted.
+> night. Admin specials are never deleted. This feeds app versions **without**
+> the question engine — keep it running until those versions are gone.
+>
+> The question engine runs at **00:10 UTC** (`quiz:generate:prod`). It builds
+> new questions for every style switched on in the admin **Question Styles**
+> panel (`quiz_styles`), saves them to `quiz_items`, then fills that UTC day's
+> `daily_quiz_items` edition (newer app versions). Run
+> `museum-app/supabase/quiz-engine.sql` once before the first night. Try it
+> first with `npm run quiz:generate -- --dry-run` (builds and prints, writes
+> nothing). Admins can also run it any time with **Generate now**. Its log
+> rotation is set up in "Rotate the log" below.
 
 ### Artist profile cron (For You story cards)
 
@@ -254,6 +282,42 @@ Confirm cron fired it at all (Ubuntu logs every invocation to syslog):
 grep CRON /var/log/syslog | grep narsil
 ```
 
+### Question engine cron (quiz questions)
+
+Builds new quiz questions for every style switched on in the app's admin
+**Question styles** panel, then fills that UTC day's daily mix. Full guide:
+[docs/quiz-engine.md](docs/quiz-engine.md).
+
+```
+quiz_styles (admin on/off + settings) ─┐
+artworks + artists                     ├─► build ─► validate ─► quiz_items ─► daily_quiz_items
+quiz_engine_config (daily count)       ┘
+```
+
+First-time setup:
+
+1. Supabase → SQL Editor → run `museum-app/supabase/quiz-engine.sql`
+   (seeds 27 styles, only **Classic** switched on).
+2. Deploy the backend: `npm run deploy`.
+3. Dry run — builds and prints, writes nothing:
+
+   ```bash
+   npm run quiz:generate -- --dry-run
+   npm run quiz:generate -- --dry-run --count=3 \
+     --style=pick_image,select_all,timeline,year_slider,zoom_reveal,older_newer
+   ```
+
+   Any style that prints `built 0/…` lacks data in this catalog — leave it off.
+4. First real run: `npm run quiz:generate:prod`. Expect
+   `classic: saved 10/10 …` and `daily <date>: added 10, now 10`.
+5. Add the `quiz-generate` cron line (above) and its logrotate block (below).
+6. Switch more styles on in the admin panel. The next run (or **Generate
+   now**) builds them.
+
+Check the log: `tail -n 40 ~/quiz-generate-cron.log`. A healthy run ends with
+`saved N question(s)`; lines starting `  !` are rejected questions or styles
+with a problem. Admins see the same in **Question styles → Last run**.
+
 ### Rotate the log (once)
 
 The cron line appends forever. Without rotation the file grows unbounded and old
@@ -274,6 +338,19 @@ sudo tee /etc/logrotate.d/narsil-ingest > /dev/null <<'EOF'
 EOF
 
 sudo logrotate -d /etc/logrotate.d/narsil-ingest   # dry run; drop -d to apply
+
+sudo tee /etc/logrotate.d/narsil-quiz-generate > /dev/null <<'EOF'
+/home/ubuntu/quiz-generate-cron.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+  su ubuntu ubuntu
+}
+EOF
 ```
 
 ---
@@ -282,10 +359,14 @@ sudo logrotate -d /etc/logrotate.d/narsil-ingest   # dry run; drop -d to apply
 
 ```bash
 cd ~/narsil-museum-backend
-git pull
-npm install            # only if dependencies changed
-# next cron run uses the new code (nothing to restart — it's a batch job)
+npm run deploy         # pull, clean install, build dist/, restart the API (pm2)
 ```
+
+A plain `git pull` is **not** enough. Only the artwork ingest runs from source
+(`npm run ingest`, via tsx). The other jobs (`ingest:artists:prod`,
+`quiz:generate:prod`, `quiz:daily:prod`, `push:daily:prod`) and the API itself
+run the compiled `dist/` build, so they keep running the old code until it is
+rebuilt.
 
 ### One-time cleanup after the artist-name hygiene change
 
@@ -306,6 +387,10 @@ once in the Supabase SQL Editor after that ingest completes.
 | `INGEST_CONCURRENCY` | 6 | Parallel downloads/uploads |
 | `S3_ARTIST_PREFIX` | artworks/artists | Legacy portrait folder (Wikidata portraits disabled) |
 | Artist profile cron | `npm run ingest:artists -- --limit=50` | Make up to 50 ready cards/day (museum first, Wikipedia if needed) |
+
+The question engine has no `.env` settings: which styles run, how many
+questions each makes, and the daily question count are all set in the app's
+admin **Question styles** panel (`quiz_styles` / `quiz_engine_config`).
 
 ### Rolling back to a single source
 

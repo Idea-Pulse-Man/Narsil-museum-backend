@@ -7,6 +7,10 @@
  *     so it stays idempotent against the Stripe webhook.
  *   GET  /api/admin/orders/:id       — fulfilment status for any order.
  *   POST /api/admin/quiz/generate    — OpenAI MCQs grounded in catalog works.
+ *   GET  /api/admin/quiz/engine/styles  — question-style registry (settings forms).
+ *   POST /api/admin/quiz/engine/preview — sample questions for a style, not saved.
+ *   POST /api/admin/quiz/engine/run     — "Generate now" (all enabled or one style).
+ *   GET  /api/admin/quiz/engine/runs    — generator run history.
  *   GET  /api/admin/printful/drafts  — Printful orders waiting to be confirmed
  *     (paid orders arrive as drafts while PRINTFUL_CONFIRM_ORDERS is off).
  *
@@ -16,10 +20,13 @@
  */
 import { Router } from "express";
 import type { CatalogService } from "../museum/catalog.js";
-import { requireAdmin } from "../middleware/auth.js";
+import { authedUser, requireAdmin } from "../middleware/auth.js";
 import { finalizeOrder, getOrderStatus } from "../services/checkout.js";
 import { generateQuizQuestions } from "../services/quizGenerate.js";
 import { listPrintfulDrafts } from "../services/printful.js";
+import { listRuns, previewStyle, runGeneration } from "../quiz/generate.js";
+import { describeStyles } from "../quiz/styles/index.js";
+import type { StyleSettings } from "../quiz/types.js";
 
 export function adminRoutes(catalog: CatalogService): Router {
   const router = Router();
@@ -109,6 +116,53 @@ export function adminRoutes(catalog: CatalogService): Router {
         res.status(400).json({ error: "Bad Request", message });
         return;
       }
+      next(err);
+    }
+  });
+
+  // ── Question engine (quiz_styles / quiz_items) ─────────────────────────
+
+  router.get("/quiz/engine/styles", (_req, res) => {
+    res.json({ styles: describeStyles() });
+  });
+
+  router.post("/quiz/engine/preview", async (req, res, next) => {
+    try {
+      const body = req.body as Record<string, unknown>;
+      const style = String(body.style ?? "");
+      const settings =
+        body.settings && typeof body.settings === "object"
+          ? (body.settings as StyleSettings)
+          : null;
+      const result = await previewStyle(style, settings, Number(body.count) || 3);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/quiz/engine/run", async (req, res, next) => {
+    try {
+      const body = req.body as Record<string, unknown>;
+      const style = typeof body.style === "string" && body.style ? body.style : null;
+      const count = Number(body.count);
+      const summary = await runGeneration({
+        trigger: "admin",
+        styleIds: style ? [style] : undefined,
+        count: Number.isFinite(count) && count > 0 ? Math.min(200, count) : undefined,
+        fillDaily: body.fill_daily !== false,
+        requestedBy: authedUser(req).id,
+      });
+      res.json(summary);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/quiz/engine/runs", async (req, res, next) => {
+    try {
+      res.json({ runs: await listRuns(Number(req.query.limit) || 20) });
+    } catch (err) {
       next(err);
     }
   });

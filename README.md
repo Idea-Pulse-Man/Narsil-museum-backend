@@ -1,13 +1,16 @@
 # narsil-museum-backend
 
 The API server for the **Narsil** app ([museum-app](https://github.com/Idea-Pulse-Man/Narsil-app-frontend)).
-It does three jobs:
+It does four jobs:
 
 1. **Catalog.** A daily ingest job pulls public-domain art from six museum APIs, stores the images in S3 and upserts the works into Supabase. The app reads the catalog straight from Supabase; this server adds image delivery, downloads and single-artwork lookups.
 2. **Canvas checkout.** It prices orders, takes payment through Stripe and sends paid orders to Printful for printing (US addresses only). Printful's webhook reports shipping back.
 3. **Narsil Pro.** It verifies Apple in-app purchases and serves subscription status.
+4. **Quiz, notifications and sharing.** Nightly jobs write the daily Royal Assessment and generate questions for every question style switched on in the admin (the question engine, `src/quiz/`). Other jobs send daily quiz and streak push notifications, and `/share/:id` serves link-preview pages.
 
 Built with Node.js 22, Express and TypeScript.
+
+**More docs:** [INGEST.md](INGEST.md) (cron jobs on EC2) · [docs/configuration.md](docs/configuration.md) (every `.env` setting) · [docs/runbook.md](docs/runbook.md) (deploy, logs, fixing production) · [docs/quiz-engine.md](docs/quiz-engine.md) (question engine, adding a style) · [CHANGELOG.md](CHANGELOG.md)
 
 ## Quick start
 
@@ -29,11 +32,12 @@ npm run dev            # http://localhost:4000
 | `npm run deploy` | **On EC2:** pull, clean install, build, restart pm2 |
 | `npm run ingest` | Daily catalog import (see [INGEST.md](INGEST.md)) |
 | `npm run ingest:artists` | Daily artist-profile cards (Wikidata) |
-| `npm run quiz:daily` | Writes the shared daily Royal Assessment |
+| `npm run quiz:daily` | Writes the shared daily Royal Assessment (classic, for app versions without the question engine) |
+| `npm run quiz:generate` | Question engine: builds questions for every style switched on in the admin, fills the daily mix (`--dry-run`, `--style=a,b`, `--count=N`, `--no-daily`, `--date=YYYY-MM-DD`) |
 | `npm run push:daily -- --quiz` / `--streak` | Daily quiz and streak-at-risk notifications |
 | `npm run backfill:descriptions` | Repairs and AI-describes existing rows (`--dry-run`, `--skip-ai`, `--ai-limit=N`) |
 
-The `:prod` variants of the ingest scripts run the compiled `dist/` build.
+Every job script has a `:prod` variant (`ingest:prod`, `quiz:generate:prod`, `push:daily:prod`…) that runs the compiled `dist/` build. Cron uses those; the schedule is in [INGEST.md](INGEST.md#schedule-it-daily-cron).
 
 ## API
 
@@ -62,6 +66,10 @@ All routes live under `/api`. Every client gets 600 requests per minute; stricte
 | POST | `/admin/orders/:id/retry` | admin | Retries a failed Printful submission |
 | GET | `/admin/orders/:id` | admin | Order detail |
 | POST | `/admin/quiz/generate` | admin | AI-generated quiz questions |
+| GET | `/admin/quiz/engine/styles` | admin | Question-style registry (drives the admin settings forms) |
+| POST | `/admin/quiz/engine/preview` | admin | Sample questions for one style + settings, nothing saved |
+| POST | `/admin/quiz/engine/run` | admin | "Generate now": every enabled style, or `{ style, count }`; also tops up today's daily mix |
+| GET | `/admin/quiz/engine/runs` | admin | Generator run history |
 | GET | `/admin/printful/drafts` | admin | Paid orders waiting to be confirmed in Printful |
 | POST | `/refresh` | admin | Drops the catalog cache |
 
@@ -73,6 +81,40 @@ Outside `/api`:
 | GET | `/.well-known/apple-app-site-association` | Lets the iPhone app open `/share/*` links (needs `APPLE_TEAM_ID`) |
 
 "User" means a Supabase access token in `Authorization: Bearer …`. "Admin" also requires `profiles.role = 'admin'`.
+
+### Errors
+
+Every error is JSON with the same two fields:
+
+```json
+{ "error": "Request Failed", "message": "Human-readable reason" }
+```
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `Bad Request` / `Request Failed` | Invalid input (missing field, bad size, non-US address…) |
+| 401 | `Unauthorized` | No or expired Supabase token on a user route |
+| 403 | `Forbidden` | Signed in, but not an admin on an admin route ("Admin access required.") |
+| 404 | `Not Found` | No such route (`No route for GET /api/…`) or record |
+| 409 | `Request Failed` | Conflict — e.g. a quiz generation run is already in progress |
+| 429 | `Too Many Requests` | Rate limit hit (see below) |
+| 502 | `Upstream Error` | Any unexpected failure, usually a museum API, Stripe, Printful or Apple call. Logged to the admin **Insights** tab |
+| 503 | `Request Failed` | A required service isn't configured on the server (Supabase, Stripe…) |
+
+### Rate limits
+
+Fixed windows per client IP, kept in memory (they reset when pm2 restarts). Every response
+carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds); a 429 also
+sends `Retry-After`.
+
+| Applies to | Limit |
+|---|---|
+| All of `/api` | 600 requests / minute |
+| `GET /artworks/:id/download` | 30 / 10 minutes |
+| `GET /artist-photo` | 60 / minute |
+| `POST /telemetry` | 120 / 10 minutes |
+
+Behind CloudFront the client IP is only right with `TRUST_PROXY=1` (the default).
 
 ## Money rules (read before changing checkout)
 
@@ -94,7 +136,7 @@ Outside `/api`:
 | Firewall | Port 4000 only accepts CloudFront (prefix list `pl-b6a144df`) |
 | Database | Supabase (setup order in `museum-app/supabase/README.md`) |
 | Images | S3 bucket `narsil-backend-images` |
-| Crons | Ingest, artist profiles and daily quiz; see [INGEST.md](INGEST.md#schedule-it-daily-cron) |
+| Crons | Ingest, artist profiles, daily quiz and the question engine; see [INGEST.md](INGEST.md#schedule-it-daily-cron) |
 
 CloudFront must allow **POST**, use **CachingDisabled**, and use the **AllViewer** origin request
 policy. Otherwise the `Authorization` and `Stripe-Signature` headers are dropped and payments
@@ -102,7 +144,8 @@ break. `TRUST_PROXY=1` (the default) makes rate limits use the visitor's IP rath
 CloudFront's.
 
 **Deploying:** on the server, run `cd ~/narsil-museum-backend && npm run deploy`. A plain `git pull` is
-not enough, because pm2 runs the compiled `dist/`.
+not enough, because pm2 runs the compiled `dist/`. Rollback, health checks, log locations and fixes for
+common failures are in [docs/runbook.md](docs/runbook.md).
 
 **Reminder:** the Printful API token (`PRINTFUL_API_KEY`, "Narsil-printful") expires on
 **2027-01-23**. Replace it before then (scopes: Orders, Orders/read), or every canvas order fails.
@@ -111,17 +154,19 @@ GitHub Actions runs type-check, tests and build on every push to `main` (`.githu
 
 ## Configuration
 
-All settings are environment variables. [.env.example](.env.example) documents each one.
+All settings are environment variables. [.env.example](.env.example) documents each one, and
+[docs/configuration.md](docs/configuration.md) lists every variable with its default and what
+happens when it is missing.
 
 | Group | Variables |
 |---|---|
-| Server | `PORT`, `NODE_ENV`, `CORS_ORIGIN` (extra origins; the app's own are built in), `TRUST_PROXY`, `PUBLIC_BASE_URL` |
-| Catalog | `MUSEUM_SOURCES` (`wellcome,artic,met,cma,rijks,flickr`), `IMAGE_DELIVERY`, `IIIF_IMAGE_WIDTH`, `CATALOG_LIMIT`, `CATALOG_CACHE_TTL_MS`, `FLICKR_API_KEY` |
-| Ingest | `AWS_REGION`, `S3_BUCKET`, `S3_PREFIX`, `S3_ARTIST_PREFIX`, `S3_PUBLIC_BASE_URL`, `INGEST_IMAGE_WIDTH`, `INGEST_SKIP_EXISTING`, `INGEST_CONCURRENCY`, `INGEST_ARTIST_PHOTOS` |
+| Server | `PORT`, `NODE_ENV`, `CORS_ORIGIN` (extra origins; the app's own are built in), `TRUST_PROXY`, `PUBLIC_BASE_URL` (falls back to Vercel's `VERCEL_URL`) |
+| Catalog | `MUSEUM_SOURCES` (`wellcome,artic,met,cma,rijks,flickr`; the older singular `MUSEUM_SOURCE` still works), `MUSEUM_API_BASE_URL`, `IIIF_BASE_URL`, `IMAGE_DELIVERY`, `IIIF_IMAGE_WIDTH`, `CATALOG_LIMIT`, `CATALOG_CACHE_TTL_MS`, `FLICKR_API_KEY`, `FLICKR_ACCOUNTS` |
+| Ingest | `AWS_REGION`, `S3_BUCKET`, `S3_PREFIX`, `S3_ARTIST_PREFIX`, `S3_PUBLIC_BASE_URL`, `INGEST_IMAGE_WIDTH`, `INGEST_SKIP_EXISTING`, `INGEST_CONCURRENCY` |
 | AI | `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.5`) |
 | Supabase | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
 | Stripe | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `CHECKOUT_CURRENCY` |
-| Printful | `PRINTFUL_API_KEY`, `PRINTFUL_STORE_ID`, `PRINTFUL_WEBHOOK_SECRET`, `PRINTFUL_CONFIRM_ORDERS`, `PRINTFUL_CANVAS_PRODUCT_ID` |
+| Printful | `PRINTFUL_API_KEY`, `PRINTFUL_STORE_ID`, `PRINTFUL_WEBHOOK_SECRET`, `PRINTFUL_CONFIRM_ORDERS`, `PRINTFUL_CANVAS_PRODUCT_ID`, `PRINTFUL_VARIANT_SMALL` / `_MEDIUM` / `_LARGE` |
 | Apple | `APPLE_PRIVATE_KEY`, `APPLE_KEY_ID`, `APPLE_ISSUER_ID`, `APPLE_BUNDLE_ID`, `APPLE_APP_APPLE_ID`, `APPLE_ENVIRONMENT`, `APPLE_ROOT_CA_DIR`, `APPLE_PRODUCT_IDS` |
 | Push + links | `APNS_KEY`, `APNS_KEY_ID`, `APPLE_TEAM_ID`, `APNS_ENVIRONMENT`, `WEB_APP_URL` |
 | Posters | `PRINTFUL_POSTER_PRODUCT_ID` (default 1) |
@@ -146,11 +191,16 @@ src/
 ├── middleware/            # auth (user/admin), rateLimit, 404, errors
 ├── routes/                # One file per /api area (see API table)
 ├── services/              # checkout, pricing, printful, recipient, stripe,
-│                          # appleStore, subscriptions, sellability, quizGenerate
+│                          # appleStore, subscriptions, sellability, quizGenerate (AI),
+│                          # push, telemetry, accountDeletion, supabaseAdmin
 ├── museum/                # Museum sources (wellcome, artic, met, cma, rijks,
 │                          # flickr), IIIF, taxonomy, live catalog cache
 ├── ingest/                # Daily jobs: run (catalog), artistProfiles,
-│                          # dailyQuiz, backfillDescriptions, aiDescription
+│                          # enrichArtistWiki, dailyQuiz, quizGenerate, pushDaily,
+│                          # backfillDescriptions, aiDescription (+ s3, store helpers)
+├── quiz/                  # Question engine: catalog loader, 27 style builders
+│                          # (styles/), validator, scoring, generate (cron + admin);
+│                          # guide in docs/quiz-engine.md
 ├── types/domain.ts        # Artwork / Artist (mirror the app's types)
 └── utils/                 # http, cache, wall text, image download helpers
 ```
