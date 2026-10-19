@@ -162,6 +162,7 @@ last month's:
 0 3 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) ===" && npm run ingest' >> ~/ingest-cron.log 2>&1
 0 6 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) artist-profiles ===" && npm run ingest:artists:prod -- --limit=50' >> ~/artist-profiles-cron.log 2>&1
 15 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) daily-quiz ===" && npm run quiz:daily:prod' >> ~/daily-quiz-cron.log 2>&1
+10 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) quiz-generate ===" && npm run quiz:generate:prod' >> ~/quiz-generate-cron.log 2>&1
 0 13 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) push-quiz ===" && npm run push:daily:prod -- --quiz' >> ~/push-cron.log 2>&1
 0 0 * * * /bin/bash -lc 'cd ~/narsil-museum-backend && echo "=== $(date -Is) push-streak ===" && npm run push:daily:prod -- --streak' >> ~/push-cron.log 2>&1
 ```
@@ -181,7 +182,17 @@ last month's:
 > The daily quiz runs at **00:15 UTC** (`quiz:daily:prod`). It writes that UTC
 > day's Royal Assessment into Supabase (10 questions) and skips a day an admin
 > has locked. Run `museum-app/supabase/daily-quiz.sql` once before the first
-> night. Admin specials are never deleted.
+> night. Admin specials are never deleted. This feeds app versions **without**
+> the question engine — keep it running until those versions are gone.
+>
+> The question engine runs at **00:10 UTC** (`quiz:generate:prod`). It builds
+> new questions for every style switched on in the admin **Question Styles**
+> panel (`quiz_styles`), saves them to `quiz_items`, then fills that UTC day's
+> `daily_quiz_items` edition (newer app versions). Run
+> `museum-app/supabase/quiz-engine.sql` once before the first night. Try it
+> first with `npm run quiz:generate -- --dry-run` (builds and prints, writes
+> nothing). Admins can also run it any time with **Generate now**. Its log
+> rotation is set up in "Rotate the log" below.
 
 ### Artist profile cron (For You story cards)
 
@@ -274,6 +285,19 @@ sudo tee /etc/logrotate.d/narsil-ingest > /dev/null <<'EOF'
 EOF
 
 sudo logrotate -d /etc/logrotate.d/narsil-ingest   # dry run; drop -d to apply
+
+sudo tee /etc/logrotate.d/narsil-quiz-generate > /dev/null <<'EOF'
+/home/ubuntu/quiz-generate-cron.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+  su ubuntu ubuntu
+}
+EOF
 ```
 
 ---

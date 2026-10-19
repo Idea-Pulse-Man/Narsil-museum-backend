@@ -29,7 +29,8 @@ npm run dev            # http://localhost:4000
 | `npm run deploy` | **On EC2:** pull, clean install, build, restart pm2 |
 | `npm run ingest` | Daily catalog import (see [INGEST.md](INGEST.md)) |
 | `npm run ingest:artists` | Daily artist-profile cards (Wikidata) |
-| `npm run quiz:daily` | Writes the shared daily Royal Assessment |
+| `npm run quiz:daily` | Writes the shared daily Royal Assessment (classic, for app versions without the question engine) |
+| `npm run quiz:generate` | Question engine: builds questions for every style switched on in the admin, fills the daily mix (`--dry-run`, `--style=a,b`, `--count=N`, `--no-daily`, `--date=YYYY-MM-DD`) |
 | `npm run push:daily -- --quiz` / `--streak` | Daily quiz and streak-at-risk notifications |
 | `npm run backfill:descriptions` | Repairs and AI-describes existing rows (`--dry-run`, `--skip-ai`, `--ai-limit=N`) |
 
@@ -62,6 +63,10 @@ All routes live under `/api`. Every client gets 600 requests per minute; stricte
 | POST | `/admin/orders/:id/retry` | admin | Retries a failed Printful submission |
 | GET | `/admin/orders/:id` | admin | Order detail |
 | POST | `/admin/quiz/generate` | admin | AI-generated quiz questions |
+| GET | `/admin/quiz/engine/styles` | admin | Question-style registry (drives the admin settings forms) |
+| POST | `/admin/quiz/engine/preview` | admin | Sample questions for one style + settings, nothing saved |
+| POST | `/admin/quiz/engine/run` | admin | "Generate now": every enabled style, or `{ style, count }`; also tops up today's daily mix |
+| GET | `/admin/quiz/engine/runs` | admin | Generator run history |
 | GET | `/admin/printful/drafts` | admin | Paid orders waiting to be confirmed in Printful |
 | POST | `/refresh` | admin | Drops the catalog cache |
 
@@ -94,7 +99,7 @@ Outside `/api`:
 | Firewall | Port 4000 only accepts CloudFront (prefix list `pl-b6a144df`) |
 | Database | Supabase (setup order in `museum-app/supabase/README.md`) |
 | Images | S3 bucket `narsil-backend-images` |
-| Crons | Ingest, artist profiles and daily quiz; see [INGEST.md](INGEST.md#schedule-it-daily-cron) |
+| Crons | Ingest, artist profiles, daily quiz and the question engine; see [INGEST.md](INGEST.md#schedule-it-daily-cron) |
 
 CloudFront must allow **POST**, use **CachingDisabled**, and use the **AllViewer** origin request
 policy. Otherwise the `Authorization` and `Stripe-Signature` headers are dropped and payments
@@ -150,7 +155,9 @@ src/
 ├── museum/                # Museum sources (wellcome, artic, met, cma, rijks,
 │                          # flickr), IIIF, taxonomy, live catalog cache
 ├── ingest/                # Daily jobs: run (catalog), artistProfiles,
-│                          # dailyQuiz, backfillDescriptions, aiDescription
+│                          # dailyQuiz, quizGenerate, backfillDescriptions, aiDescription
+├── quiz/                  # Question engine: catalog loader, 27 style builders
+│                          # (styles/), validator, scoring, generate (cron + admin)
 ├── types/domain.ts        # Artwork / Artist (mirror the app's types)
 └── utils/                 # http, cache, wall text, image download helpers
 ```
