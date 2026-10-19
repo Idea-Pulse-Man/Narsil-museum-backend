@@ -10,7 +10,7 @@ It does four jobs:
 
 Built with Node.js 22, Express and TypeScript.
 
-**More docs:** [INGEST.md](INGEST.md) (cron jobs on EC2) · [docs/runbook.md](docs/runbook.md) (deploy, logs, fixing production) · [docs/quiz-engine.md](docs/quiz-engine.md) (question engine, adding a style) · [CHANGELOG.md](CHANGELOG.md)
+**More docs:** [INGEST.md](INGEST.md) (cron jobs on EC2) · [docs/configuration.md](docs/configuration.md) (every `.env` setting) · [docs/runbook.md](docs/runbook.md) (deploy, logs, fixing production) · [docs/quiz-engine.md](docs/quiz-engine.md) (question engine, adding a style) · [CHANGELOG.md](CHANGELOG.md)
 
 ## Quick start
 
@@ -82,6 +82,40 @@ Outside `/api`:
 
 "User" means a Supabase access token in `Authorization: Bearer …`. "Admin" also requires `profiles.role = 'admin'`.
 
+### Errors
+
+Every error is JSON with the same two fields:
+
+```json
+{ "error": "Request Failed", "message": "Human-readable reason" }
+```
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `Bad Request` / `Request Failed` | Invalid input (missing field, bad size, non-US address…) |
+| 401 | `Unauthorized` | No or expired Supabase token on a user route |
+| 403 | `Forbidden` | Signed in, but not an admin on an admin route ("Admin access required.") |
+| 404 | `Not Found` | No such route (`No route for GET /api/…`) or record |
+| 409 | `Request Failed` | Conflict — e.g. a quiz generation run is already in progress |
+| 429 | `Too Many Requests` | Rate limit hit (see below) |
+| 502 | `Upstream Error` | Any unexpected failure, usually a museum API, Stripe, Printful or Apple call. Logged to the admin **Insights** tab |
+| 503 | `Request Failed` | A required service isn't configured on the server (Supabase, Stripe…) |
+
+### Rate limits
+
+Fixed windows per client IP, kept in memory (they reset when pm2 restarts). Every response
+carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds); a 429 also
+sends `Retry-After`.
+
+| Applies to | Limit |
+|---|---|
+| All of `/api` | 600 requests / minute |
+| `GET /artworks/:id/download` | 30 / 10 minutes |
+| `GET /artist-photo` | 60 / minute |
+| `POST /telemetry` | 120 / 10 minutes |
+
+Behind CloudFront the client IP is only right with `TRUST_PROXY=1` (the default).
+
 ## Money rules (read before changing checkout)
 
 - **Prices are set in one place:** [src/services/pricing.ts](src/services/pricing.ts). Checkout charges from it, and the app displays it via `GET /api/prices`. Canvas costs were verified against Printful quotes on 2026-09-28.
@@ -120,7 +154,9 @@ GitHub Actions runs type-check, tests and build on every push to `main` (`.githu
 
 ## Configuration
 
-All settings are environment variables. [.env.example](.env.example) documents each one.
+All settings are environment variables. [.env.example](.env.example) documents each one, and
+[docs/configuration.md](docs/configuration.md) lists every variable with its default and what
+happens when it is missing.
 
 | Group | Variables |
 |---|---|

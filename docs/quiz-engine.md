@@ -67,6 +67,62 @@ A crop `{ x, y, scale }` scales the image by `scale` around the CSS
 transform-origin `(x, y)`. Tile `(col, row)` of an n×n grid is
 `tileCrop(col, row, n)` = `{ x: col/(n-1), y: row/(n-1), scale: n }`.
 
+## Style reference
+
+Defaults shown **bold**, allowed range in brackets. Every style also has a
+**Difficulty tag** setting (`mixed` / `apprentice` / `scholar` / `master`) —
+listed only where its default isn't `mixed`. "Surfaces" are the builder's
+suggestion; the live value is the `quiz_styles.surfaces` column the admin edits.
+"Needs" is the catalog data a style can't work without — a style missing it
+builds 0 questions.
+
+| Style id | Name | Answer | Surfaces | Settings | Needs |
+|---|---|---|---|---|---|
+| `classic` | Classic | single | daily, practice | Modes: **all 8** (title, artist, date, origin, medium, period, collection, subject) | any field per mode |
+| `pick_image` | Pick one | single | daily, practice | Ask about: **empire** (empire / period / artist / medium) · Images: **4** [3–6] | the field, on several works |
+| `select_all` | Select all | multi | daily, practice | Ask about: **period** (period / artist / empire) · Images: **6** [4–8] · Min right: **2** [1–4] · Max right: **3** [1–5] | a group of ≥ min right works |
+| `odd_one_out` | Odd one out | single | daily, practice | Group by: **artist** (artist / period / empire) · Images: **4** [3–6] | a group of ≥ images − 1 works |
+| `find_pair` | Find the pair | multi | practice | Pair by: **artist** (artist / period / empire) · Images: **4** [4–6] | two works sharing the field |
+| `placard_match` | Placard match | single | practice | Images: **4** [3–6] · Min label length: **90** [40–400] | `description` / `ai_description` |
+| `detail_match` | Detail match | single | daily, practice | Zoom: **3×** [2–5, step 0.5] · Images: **4** [3–6] | images only |
+| `zoom_reveal` | Zoom-out | single | practice | Ask about: **artist** (artist / title / period / empire) · Reveal time: **10 s** [4–30] | the asked field |
+| `blur_reveal` | Blur reveal | single | practice | same as Zoom-out | the asked field |
+| `tiles_reveal` | Tile reveal | single | practice | same as Zoom-out | the asked field |
+| `mirror` | Real or mirrored | binary | practice | Paintings only: **yes** · Difficulty: **master** | paintings that aren't portraits |
+| `intruder_tile` | Intruder tile | single | practice | — | images only |
+| `missing_piece` | Missing piece | single | practice | — | images only |
+| `timeline` | Timeline | order | daily, practice | Works: **4** [3–5] · Min years apart: **30** [5–300] | parseable `year` |
+| `match_pairs` | Match pairs | match | practice | Match to: **artist** (artist / title) · Pairs: **3** [2–4] | distinct values |
+| `match_period` | Match to period | match | practice | Match to: **period** (period / empire) · Pairs: **3** [2–4] | distinct values |
+| `sort_groups` | Sort into groups | match | practice | Group by: **empire** (empire / period / artist) · Works: **6** [4–8] | two groups of ≥ works / 2 |
+| `year_slider` | Year slider | numeric | daily, practice | Full points within: **10 y** [0–100] · No points beyond: **150 y** [20–1000] · Slider width: **400 y** [100–2000] | parseable `year` |
+| `before_after` | Before or after | binary | daily, practice | Min years from the pivot: **40** [10–300] | parseable `year` |
+| `older_newer` | Older or newer | binary | daily, practice | Min years apart: **30** [5–500] | parseable `year` |
+| `more_loved` | More loved | binary | practice | Min like difference: **3** [1–500] · Difficulty: **apprentice** | `like_count` |
+| `true_false` | True or false | binary | daily, practice | Statement about: **artist** (artist / period / empire / medium / museum) · Difficulty: **apprentice** | the field |
+| `two_truths` | Two truths and a lie | single | practice | Difficulty: **scholar** | 3 of: year, medium, museum, artist, period, empire |
+| `fill_title` | Fill the title | single | daily, practice | — | titles of 2+ words |
+| `type_artist` | Type the artist | text | practice | Autocomplete names: **40** [10–120] · Difficulty: **master** | named artists |
+| `unscramble` | Unscramble | text | practice | Max letters: **9** [4–12] | named artists |
+| `clue_ladder` | Clue ladder | single | practice | Seconds between clues: **3** [1–10] · Difficulty: **scholar** | named artist + 3 clue fields |
+
+How each style picks its wrong answers matters for difficulty:
+
+- **Image styles** take distractors from the **same category first** (a Roman
+  marble sits beside Greek and Etruscan marbles, not a Dutch landscape) and
+  prefer distractors that differ from each other.
+- **Classic "Date"** picks the 8 nearest dates and shuffles 3 of them, so the
+  wrong years are close to the right one.
+- **Year slider** puts the answer at a random 15–85% point of the slider, so
+  the middle never gives it away. A guess counts as "correct" at ≥ 50% of the
+  points.
+- **Placard match** blanks the title and the artist's names (and each part of
+  the name of 4+ letters) with `▁▁▁`, then trims to ~260 characters.
+- **Unscramble** uses the last name, or the first name when a particle sits in
+  between ("Rembrandt van Rijn" → REMBRANDT); the full name is also accepted.
+- **Type the artist** accepts the short name only when no other artist in the
+  catalog shares it.
+
 ## Adding a style
 
 1. **Write the builder** in the matching `styles/*.ts` file:

@@ -282,6 +282,42 @@ Confirm cron fired it at all (Ubuntu logs every invocation to syslog):
 grep CRON /var/log/syslog | grep narsil
 ```
 
+### Question engine cron (quiz questions)
+
+Builds new quiz questions for every style switched on in the app's admin
+**Question styles** panel, then fills that UTC day's daily mix. Full guide:
+[docs/quiz-engine.md](docs/quiz-engine.md).
+
+```
+quiz_styles (admin on/off + settings) ─┐
+artworks + artists                     ├─► build ─► validate ─► quiz_items ─► daily_quiz_items
+quiz_engine_config (daily count)       ┘
+```
+
+First-time setup:
+
+1. Supabase → SQL Editor → run `museum-app/supabase/quiz-engine.sql`
+   (seeds 27 styles, only **Classic** switched on).
+2. Deploy the backend: `npm run deploy`.
+3. Dry run — builds and prints, writes nothing:
+
+   ```bash
+   npm run quiz:generate -- --dry-run
+   npm run quiz:generate -- --dry-run --count=3 \
+     --style=pick_image,select_all,timeline,year_slider,zoom_reveal,older_newer
+   ```
+
+   Any style that prints `built 0/…` lacks data in this catalog — leave it off.
+4. First real run: `npm run quiz:generate:prod`. Expect
+   `classic: saved 10/10 …` and `daily <date>: added 10, now 10`.
+5. Add the `quiz-generate` cron line (above) and its logrotate block (below).
+6. Switch more styles on in the admin panel. The next run (or **Generate
+   now**) builds them.
+
+Check the log: `tail -n 40 ~/quiz-generate-cron.log`. A healthy run ends with
+`saved N question(s)`; lines starting `  !` are rejected questions or styles
+with a problem. Admins see the same in **Question styles → Last run**.
+
 ### Rotate the log (once)
 
 The cron line appends forever. Without rotation the file grows unbounded and old
