@@ -1,11 +1,12 @@
 # narsil-museum-backend
 
 The API server for the **Narsil** app ([museum-app](https://github.com/Idea-Pulse-Man/Narsil-app-frontend)).
-It does three jobs:
+It does four jobs:
 
 1. **Catalog.** A daily ingest job pulls public-domain art from six museum APIs, stores the images in S3 and upserts the works into Supabase. The app reads the catalog straight from Supabase; this server adds image delivery, downloads and single-artwork lookups.
 2. **Canvas checkout.** It prices orders, takes payment through Stripe and sends paid orders to Printful for printing (US addresses only). Printful's webhook reports shipping back.
 3. **Narsil Pro.** It verifies Apple in-app purchases and serves subscription status.
+4. **Quiz, notifications and sharing.** Nightly jobs write the daily Royal Assessment and generate questions for every question style switched on in the admin (the question engine, `src/quiz/`). Other jobs send daily quiz and streak push notifications, and `/share/:id` serves link-preview pages.
 
 Built with Node.js 22, Express and TypeScript.
 
@@ -34,7 +35,7 @@ npm run dev            # http://localhost:4000
 | `npm run push:daily -- --quiz` / `--streak` | Daily quiz and streak-at-risk notifications |
 | `npm run backfill:descriptions` | Repairs and AI-describes existing rows (`--dry-run`, `--skip-ai`, `--ai-limit=N`) |
 
-The `:prod` variants of the ingest scripts run the compiled `dist/` build.
+Every job script has a `:prod` variant (`ingest:prod`, `quiz:generate:prod`, `push:daily:prod`…) that runs the compiled `dist/` build. Cron uses those; the schedule is in [INGEST.md](INGEST.md#schedule-it-daily-cron).
 
 ## API
 
@@ -120,13 +121,13 @@ All settings are environment variables. [.env.example](.env.example) documents e
 
 | Group | Variables |
 |---|---|
-| Server | `PORT`, `NODE_ENV`, `CORS_ORIGIN` (extra origins; the app's own are built in), `TRUST_PROXY`, `PUBLIC_BASE_URL` |
-| Catalog | `MUSEUM_SOURCES` (`wellcome,artic,met,cma,rijks,flickr`), `IMAGE_DELIVERY`, `IIIF_IMAGE_WIDTH`, `CATALOG_LIMIT`, `CATALOG_CACHE_TTL_MS`, `FLICKR_API_KEY` |
-| Ingest | `AWS_REGION`, `S3_BUCKET`, `S3_PREFIX`, `S3_ARTIST_PREFIX`, `S3_PUBLIC_BASE_URL`, `INGEST_IMAGE_WIDTH`, `INGEST_SKIP_EXISTING`, `INGEST_CONCURRENCY`, `INGEST_ARTIST_PHOTOS` |
+| Server | `PORT`, `NODE_ENV`, `CORS_ORIGIN` (extra origins; the app's own are built in), `TRUST_PROXY`, `PUBLIC_BASE_URL` (falls back to Vercel's `VERCEL_URL`) |
+| Catalog | `MUSEUM_SOURCES` (`wellcome,artic,met,cma,rijks,flickr`; the older singular `MUSEUM_SOURCE` still works), `MUSEUM_API_BASE_URL`, `IIIF_BASE_URL`, `IMAGE_DELIVERY`, `IIIF_IMAGE_WIDTH`, `CATALOG_LIMIT`, `CATALOG_CACHE_TTL_MS`, `FLICKR_API_KEY`, `FLICKR_ACCOUNTS` |
+| Ingest | `AWS_REGION`, `S3_BUCKET`, `S3_PREFIX`, `S3_ARTIST_PREFIX`, `S3_PUBLIC_BASE_URL`, `INGEST_IMAGE_WIDTH`, `INGEST_SKIP_EXISTING`, `INGEST_CONCURRENCY` |
 | AI | `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.5`) |
 | Supabase | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
 | Stripe | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `CHECKOUT_CURRENCY` |
-| Printful | `PRINTFUL_API_KEY`, `PRINTFUL_STORE_ID`, `PRINTFUL_WEBHOOK_SECRET`, `PRINTFUL_CONFIRM_ORDERS`, `PRINTFUL_CANVAS_PRODUCT_ID` |
+| Printful | `PRINTFUL_API_KEY`, `PRINTFUL_STORE_ID`, `PRINTFUL_WEBHOOK_SECRET`, `PRINTFUL_CONFIRM_ORDERS`, `PRINTFUL_CANVAS_PRODUCT_ID`, `PRINTFUL_VARIANT_SMALL` / `_MEDIUM` / `_LARGE` |
 | Apple | `APPLE_PRIVATE_KEY`, `APPLE_KEY_ID`, `APPLE_ISSUER_ID`, `APPLE_BUNDLE_ID`, `APPLE_APP_APPLE_ID`, `APPLE_ENVIRONMENT`, `APPLE_ROOT_CA_DIR`, `APPLE_PRODUCT_IDS` |
 | Push + links | `APNS_KEY`, `APNS_KEY_ID`, `APPLE_TEAM_ID`, `APNS_ENVIRONMENT`, `WEB_APP_URL` |
 | Posters | `PRINTFUL_POSTER_PRODUCT_ID` (default 1) |
@@ -151,11 +152,13 @@ src/
 ├── middleware/            # auth (user/admin), rateLimit, 404, errors
 ├── routes/                # One file per /api area (see API table)
 ├── services/              # checkout, pricing, printful, recipient, stripe,
-│                          # appleStore, subscriptions, sellability, quizGenerate
+│                          # appleStore, subscriptions, sellability, quizGenerate (AI),
+│                          # push, telemetry, accountDeletion, supabaseAdmin
 ├── museum/                # Museum sources (wellcome, artic, met, cma, rijks,
 │                          # flickr), IIIF, taxonomy, live catalog cache
 ├── ingest/                # Daily jobs: run (catalog), artistProfiles,
-│                          # dailyQuiz, quizGenerate, backfillDescriptions, aiDescription
+│                          # enrichArtistWiki, dailyQuiz, quizGenerate, pushDaily,
+│                          # backfillDescriptions, aiDescription (+ s3, store helpers)
 ├── quiz/                  # Question engine: catalog loader, 27 style builders
 │                          # (styles/), validator, scoring, generate (cron + admin)
 ├── types/domain.ts        # Artwork / Artist (mirror the app's types)

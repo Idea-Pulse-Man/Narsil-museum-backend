@@ -1,4 +1,19 @@
-# Daily image ingestion — EC2 setup
+# Daily jobs on EC2 — ingest, artist profiles, quiz, push
+
+Every scheduled job runs from cron on the EC2 box (times are UTC, the server's clock):
+
+| Job | Command (cron) | When | What it writes |
+|---|---|---|---|
+| Artwork ingest | `npm run ingest` | 03:00 | S3 images + `artworks` / `artists` rows |
+| Artist profiles | `npm run ingest:artists:prod -- --limit=50` | 06:00 | `profile_ready` + `fyp_artist_cards` |
+| Question engine | `npm run quiz:generate:prod` | 00:10 | `quiz_items` + today's `daily_quiz_items` |
+| Daily quiz (classic) | `npm run quiz:daily:prod` | 00:15 | `daily_quizzes` / `daily_quiz_questions` (older app versions) |
+| Push: quiz | `npm run push:daily:prod -- --quiz` | 13:00 | "Today's Royal Assessment is ready" |
+| Push: streak | `npm run push:daily:prod -- --streak` | 00:00 | "Your streak ends tonight" |
+
+The exact crontab lines are in [Schedule it daily](#schedule-it-daily-cron).
+
+## Artwork ingest
 
 The ingestion job pulls public-domain artworks from a museum API, uploads the
 images to **S3** (`narsil-backend-images`), and upserts artworks + artists into
@@ -306,10 +321,14 @@ EOF
 
 ```bash
 cd ~/narsil-museum-backend
-git pull
-npm install            # only if dependencies changed
-# next cron run uses the new code (nothing to restart — it's a batch job)
+npm run deploy         # pull, clean install, build dist/, restart the API (pm2)
 ```
+
+A plain `git pull` is **not** enough. Only the artwork ingest runs from source
+(`npm run ingest`, via tsx). The other jobs (`ingest:artists:prod`,
+`quiz:generate:prod`, `quiz:daily:prod`, `push:daily:prod`) and the API itself
+run the compiled `dist/` build, so they keep running the old code until it is
+rebuilt.
 
 ### One-time cleanup after the artist-name hygiene change
 
@@ -330,6 +349,10 @@ once in the Supabase SQL Editor after that ingest completes.
 | `INGEST_CONCURRENCY` | 6 | Parallel downloads/uploads |
 | `S3_ARTIST_PREFIX` | artworks/artists | Legacy portrait folder (Wikidata portraits disabled) |
 | Artist profile cron | `npm run ingest:artists -- --limit=50` | Make up to 50 ready cards/day (museum first, Wikipedia if needed) |
+
+The question engine has no `.env` settings: which styles run, how many
+questions each makes, and the daily question count are all set in the app's
+admin **Question styles** panel (`quiz_styles` / `quiz_engine_config`).
 
 ### Rolling back to a single source
 
