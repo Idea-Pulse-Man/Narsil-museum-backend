@@ -19,9 +19,9 @@ artworks + artists (Supabase) ─┘        │                                 
   [INGEST.md](../INGEST.md)) and the admin **Generate now** button
   (`POST /api/admin/quiz/engine/run`). Both call `runGeneration` in
   [src/quiz/generate.ts](../src/quiz/generate.ts).
-- **What it reads:** every row in `quiz_styles` with `enabled = true` (or the
-  styles named with `--style=` / `{ style }`, even if switched off), plus the
-  whole visible catalog.
+- **What it reads:** every row in `quiz_styles` with `enabled = true`, plus the
+  **focus style** if the admin set one (even if switched off), or only the
+  styles named with `--style=` / `{ style }`; and the whole visible catalog.
 - **What it writes:** new rows in `quiz_items` (status `live`, or `review` when
   the style has "review before live" on), today's `daily_quiz_items`, and one
   `quiz_generation_runs` row per run.
@@ -183,6 +183,24 @@ logged — never saved.
 **Duplicates:** `fingerprint` = SHA-1 of style + sorted artwork ids + prompt +
 answer. It's `unique` in `quiz_items`, and inserts use
 `on conflict do nothing`, so re-running never duplicates a question.
+
+## Focus mode
+
+The admin's **Only this** button sets `quiz_engine_config.focus_style`. While it
+is set:
+
+- `next_quiz_items` (practice) returns only that style, ignoring each style's
+  on/off switch and surfaces; the app uses 100% engine questions.
+- `daily_quiz_edition` ignores `daily_quiz_items` and returns `daily_count`
+  live questions of that style, in a fixed order per day (`md5(id || date)`),
+  so everyone gets the same set that day.
+- `runGeneration` always includes the focus style, even if it's switched off.
+- Players who already started today's daily keep their saved set.
+
+**Clear focus** sets it back to null and everything returns to the normal mix.
+If the focus style has no live questions, players get classic questions until
+it's generated — the admin panel generates automatically when it has fewer
+than `daily_count`.
 
 ## Daily edition
 

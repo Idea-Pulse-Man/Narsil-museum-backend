@@ -97,12 +97,33 @@ async function catalogFor(db: SupabaseClient, fresh: boolean): Promise<QuizCatal
   return catalog;
 }
 
+/**
+ * The admin's focus style (every daily + practice question is this style), or
+ * null. Null too when the column doesn't exist yet (older SQL).
+ */
+async function focusStyle(db: SupabaseClient): Promise<string | null> {
+  const { data, error } = await db
+    .from("quiz_engine_config")
+    .select("focus_style")
+    .eq("id", 1)
+    .maybeSingle();
+  if (error || !data) return null;
+  const focus = (data as { focus_style?: string | null }).focus_style;
+  return focus && /^[a-z0-9_]+$/.test(focus) ? focus : null;
+}
+
+/** Explicit ids, else every enabled style plus the focus style (even if off). */
 async function loadStyles(db: SupabaseClient, ids?: string[]): Promise<StyleRow[]> {
   let query = db
     .from("quiz_styles")
     .select("id, label, answer_type, enabled, per_run, surfaces, settings, require_review")
     .order("sort_order");
-  query = ids?.length ? query.in("id", ids) : query.eq("enabled", true);
+  if (ids?.length) {
+    query = query.in("id", ids);
+  } else {
+    const focus = await focusStyle(db);
+    query = focus ? query.or(`enabled.eq.true,id.eq.${focus}`) : query.eq("enabled", true);
+  }
   const { data, error } = await query;
   if (error) throw new Error(`quiz_styles: ${error.message} (run supabase/quiz-engine.sql?)`);
   return (data ?? []) as StyleRow[];
