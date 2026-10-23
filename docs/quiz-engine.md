@@ -215,6 +215,12 @@ than `daily_count`.
 The old `quiz:daily` job keeps writing the classic `daily_quiz_questions` for
 app versions without the engine — the two editions are independent.
 
+## Practice batches
+
+`next_quiz_items` gives every switched-on style an **equal share**: it ranks
+each style's questions randomly and returns rank 1 of every style, then rank 2,
+and so on. A style with 80 questions doesn't crowd out one with 8.
+
 ## Run lock
 
 A run inserts a `running` row in `quiz_generation_runs` first. Another run
@@ -242,7 +248,8 @@ All under `/api/admin/quiz/engine`, admin token required
 |---|---|
 | `GET /styles` | `{ styles: [{ id, label, answer_type, description, surfaces, settings, defaults }] }` |
 | `POST /preview` `{ style, settings?, count? }` (count 1–10, default 3) | `{ items: QuizItemDraft[], rejected, problems }` — nothing saved |
-| `POST /run` `{ style?, count?, fill_daily? }` (count ≤ 200; `fill_daily` default true) | `{ runId, created: {style: n}, rejected, problems, daily: { date, added, total } }` |
+| `POST /run` `{ style?, count?, fill_daily? }` (count ≤ 200; `fill_daily` default true) | **202** `{ runId, status: "running" }` at once — the run continues in the background (a big run outlasts CloudFront's 30 s). Poll `GET /runs` for its `created`, `daily_added`, `problems` |
+| `POST /daily/rebuild` | `{ date, added, total, removed }` — drops today's generated daily questions and refills from the styles switched on now (admin-pinned rows stay) |
 | `GET /runs?limit=20` | `{ runs: [{ id, trigger, status, started_at, finished_at, created, rejected, problems, daily_added }] }` |
 
 Style switches, `per_run`, `surfaces`, `settings` and `require_review` are

@@ -165,6 +165,54 @@ export interface RunOptions {
   /** Build and report, write nothing. */
   dryRun?: boolean;
   log?: (line: string) => void;
+  /** A run row already opened by `startGeneration` (skips the lock + insert). */
+  runId?: string;
+}
+
+/**
+ * Take the run lock and open a `quiz_generation_runs` row. Throws 409 while
+ * another run is active (a crashed run stops blocking after 30 minutes).
+ */
+async function openRun(
+  db: SupabaseClient,
+  trigger: RunOptions["trigger"],
+  requestedBy: string | null,
+): Promise<string> {
+  const since = new Date(Date.now() - STALE_RUN_MS).toISOString();
+  const { data: running, error } = await db
+    .from("quiz_generation_runs")
+    .select("id")
+    .eq("status", "running")
+    .gte("started_at", since)
+    .limit(1);
+  if (error) throw new Error(`quiz_generation_runs: ${error.message} (run supabase/quiz-engine.sql?)`);
+  if (running?.length) {
+    throw new HttpError(409, "A generation run is already in progress — try again in a minute.");
+  }
+  const { data: run, error: runErr } = await db
+    .from("quiz_generation_runs")
+    .insert({ trigger, status: "running", requested_by: requestedBy })
+    .select("id")
+    .single();
+  if (runErr) throw new Error(runErr.message);
+  return (run as { id: string }).id;
+}
+
+/**
+ * Admin "Generate now": open the run, answer at once with its id, and keep
+ * generating in the background. A big run takes longer than CloudFront's
+ * 30-second origin timeout, so the admin panel polls `GET /runs` instead of
+ * waiting on this request.
+ */
+export async function startGeneration(
+  opts: Omit<RunOptions, "runId" | "dryRun" | "log">,
+): Promise<{ runId: string }> {
+  const runId = await openRun(supabaseAdmin(), opts.trigger, opts.requestedBy ?? null);
+  void runGeneration({ ...opts, runId }).catch((err) => {
+    // runGeneration already marked the run failed; keep the process alive.
+    console.error("[quiz-engine] background run failed:", err instanceof Error ? err.message : err);
+  });
+  return { runId };
 }
 
 export interface RunSummary {
@@ -188,25 +236,10 @@ export async function runGeneration(opts: RunOptions): Promise<RunSummary> {
     samples: [],
   };
 
-  if (!opts.dryRun) {
-    const since = new Date(Date.now() - STALE_RUN_MS).toISOString();
-    const { data: running, error } = await db
-      .from("quiz_generation_runs")
-      .select("id")
-      .eq("status", "running")
-      .gte("started_at", since)
-      .limit(1);
-    if (error) throw new Error(`quiz_generation_runs: ${error.message} (run supabase/quiz-engine.sql?)`);
-    if (running?.length) {
-      throw new HttpError(409, "A generation run is already in progress — try again in a minute.");
-    }
-    const { data: run, error: runErr } = await db
-      .from("quiz_generation_runs")
-      .insert({ trigger: opts.trigger, status: "running", requested_by: opts.requestedBy ?? null })
-      .select("id")
-      .single();
-    if (runErr) throw new Error(runErr.message);
-    summary.runId = (run as { id: string }).id;
+  if (opts.runId) {
+    summary.runId = opts.runId;
+  } else if (!opts.dryRun) {
+    summary.runId = await openRun(db, opts.trigger, opts.requestedBy ?? null);
   }
 
   try {
@@ -397,6 +430,24 @@ export async function fillDailyEdition(db: SupabaseClient, date = utcDay()): Pro
     if (error) throw new Error(`daily_quiz_items insert: ${error.message}`);
   }
   return { date, added: rows.length, total: have.length + rows.length };
+}
+
+/**
+ * Admin "Rebuild today's daily": drop the day's generated questions and fill
+ * it again from the styles switched on now. Admin-pinned rows stay. Players
+ * who already started the day keep their saved set.
+ */
+export async function rebuildDailyEdition(date = utcDay()): Promise<DailyFill & { removed: number }> {
+  const db = supabaseAdmin();
+  const { data: removedRows, error } = await db
+    .from("daily_quiz_items")
+    .delete()
+    .eq("quiz_date", date)
+    .eq("source", "generated")
+    .select("item_id");
+  if (error) throw new HttpError(500, `daily_quiz_items: ${error.message}`);
+  const fill = await fillDailyEdition(db, date);
+  return { ...fill, removed: removedRows?.length ?? 0 };
 }
 
 export async function listRuns(limit = 20) {
