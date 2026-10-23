@@ -9,7 +9,10 @@
  *   POST /api/admin/quiz/generate    — OpenAI MCQs grounded in catalog works.
  *   GET  /api/admin/quiz/engine/styles  — question-style registry (settings forms).
  *   POST /api/admin/quiz/engine/preview — sample questions for a style, not saved.
- *   POST /api/admin/quiz/engine/run     — "Generate now" (all enabled or one style).
+ *   POST /api/admin/quiz/engine/run     — "Generate now" (all enabled or one style);
+ *     answers 202 { runId } at once and generates in the background.
+ *   POST /api/admin/quiz/engine/daily/rebuild — refill today's daily mix from the
+ *     styles switched on now.
  *   GET  /api/admin/quiz/engine/runs    — generator run history.
  *   GET  /api/admin/printful/drafts  — Printful orders waiting to be confirmed
  *     (paid orders arrive as drafts while PRINTFUL_CONFIRM_ORDERS is off).
@@ -24,7 +27,7 @@ import { authedUser, requireAdmin } from "../middleware/auth.js";
 import { finalizeOrder, getOrderStatus } from "../services/checkout.js";
 import { generateQuizQuestions } from "../services/quizGenerate.js";
 import { listPrintfulDrafts } from "../services/printful.js";
-import { listRuns, previewStyle, runGeneration } from "../quiz/generate.js";
+import { listRuns, previewStyle, rebuildDailyEdition, startGeneration } from "../quiz/generate.js";
 import { describeStyles } from "../quiz/styles/index.js";
 import type { StyleSettings } from "../quiz/types.js";
 
@@ -146,14 +149,24 @@ export function adminRoutes(catalog: CatalogService): Router {
       const body = req.body as Record<string, unknown>;
       const style = typeof body.style === "string" && body.style ? body.style : null;
       const count = Number(body.count);
-      const summary = await runGeneration({
+      // Answers at once; the run continues in the background (CloudFront cuts
+      // requests at 30 s). The admin panel polls GET /runs for the result.
+      const { runId } = await startGeneration({
         trigger: "admin",
         styleIds: style ? [style] : undefined,
         count: Number.isFinite(count) && count > 0 ? Math.min(200, count) : undefined,
         fillDaily: body.fill_daily !== false,
         requestedBy: authedUser(req).id,
       });
-      res.json(summary);
+      res.status(202).json({ runId, status: "running" });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/quiz/engine/daily/rebuild", async (_req, res, next) => {
+    try {
+      res.json(await rebuildDailyEdition());
     } catch (err) {
       next(err);
     }

@@ -68,7 +68,8 @@ All routes live under `/api`. Every client gets 600 requests per minute; stricte
 | POST | `/admin/quiz/generate` | admin | AI-generated quiz questions |
 | GET | `/admin/quiz/engine/styles` | admin | Question-style registry (drives the admin settings forms) |
 | POST | `/admin/quiz/engine/preview` | admin | Sample questions for one style + settings, nothing saved |
-| POST | `/admin/quiz/engine/run` | admin | "Generate now": every enabled style, or `{ style, count }`; also tops up today's daily mix |
+| POST | `/admin/quiz/engine/run` | admin | "Generate now": every enabled style, or `{ style, count }`; also tops up today's daily mix. Answers 202 `{ runId }` and runs in the background |
+| POST | `/admin/quiz/engine/daily/rebuild` | admin | Refill today's daily mix from the styles switched on now |
 | GET | `/admin/quiz/engine/runs` | admin | Generator run history |
 | GET | `/admin/printful/drafts` | admin | Paid orders waiting to be confirmed in Printful |
 | POST | `/refresh` | admin | Drops the catalog cache |
