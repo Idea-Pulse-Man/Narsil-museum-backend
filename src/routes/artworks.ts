@@ -104,6 +104,7 @@ export function artworkRoutes(catalog: CatalogService): Router {
       const { response, contentType } = await openImageResponse(
         imageUrl,
         wantsHigh ? 120_000 : 45_000,
+        env.publicBaseUrl,
       );
       const ext = extForType(contentType);
       const filename =

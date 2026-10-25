@@ -31,7 +31,7 @@ import {
   type ProductType,
 } from "./pricing.js";
 import { buildRecipient, type AddressRow } from "./recipient.js";
-import { createPrintfulOrder, resolveVariantId } from "./printful.js";
+import { createPrintfulOrder, getPrintfulOrder, resolveVariantId } from "./printful.js";
 import { assertCanvasSellable } from "./sellability.js";
 import { notifyAdmins } from "./push.js";
 
@@ -254,10 +254,26 @@ export async function createCheckout(
     throw err;
   }
 
-  await supabaseAdmin()
+  const { error: linkError } = await supabaseAdmin()
     .from("canvas_orders")
     .update({ stripe_payment_intent_id: intent.id })
     .eq("id", order.id);
+  if (linkError) {
+    // Without the link no finalize call could ever verify this payment, so
+    // the customer would be charged for an order that never ships. Void the
+    // intent before anyone can pay it.
+    console.error(
+      `[checkout] order ${order.id}: could not link payment ${intent.id}: ${linkError.message}`,
+    );
+    await stripe.paymentIntents.cancel(intent.id).catch((err: unknown) => {
+      console.error(
+        `[checkout] order ${order.id}: cancelling unlinked payment ${intent.id} failed: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    });
+    await supabaseAdmin().from("canvas_orders").delete().eq("id", order.id);
+    throw new HttpError(502, "Could not start the payment. Please try again.");
+  }
 
   return {
     orderId: order.id as string,
@@ -310,11 +326,17 @@ export async function getOrderStatus(
  * both run it; only the caller that wins the `pending_payment →
  * paid` claim talks to Printful. Pass `userId` for app calls (ownership
  * check); the webhook omits it.
+ *
+ * The webhook also passes the PaymentIntent id from the event. It is used
+ * only when the order row has no linked intent, and only when the intent's
+ * own metadata names this order — so a paid customer is never stranded by a
+ * lost link write.
  */
 export async function finalizeOrder(
   catalog: CatalogService,
   orderId: string,
   userId?: string,
+  paymentIntentId?: string,
 ): Promise<OrderStatus> {
   const order = await loadOrder(orderId, userId);
 
@@ -322,21 +344,23 @@ export async function finalizeOrder(
   if (["submitted", "completed", "shipped", "cancelled"].includes(order.status)) {
     return toStatus(order);
   }
-  if (!order.stripe_payment_intent_id) {
+  const linkedIntentId = order.stripe_payment_intent_id ?? paymentIntentId;
+  if (!linkedIntentId) {
     throw new HttpError(409, "This order has no payment attached.");
   }
 
-  const intent = await getStripe().paymentIntents.retrieve(
-    order.stripe_payment_intent_id,
-  );
+  const intent = await getStripe().paymentIntents.retrieve(linkedIntentId);
   if (intent.status !== "succeeded") {
     throw new HttpError(402, "Payment has not completed for this order.");
   }
   // Only a payment for THIS order, for its full price, may reach Printful.
+  // An intent adopted from the webhook must name the order explicitly.
   const expectedAmount = Math.round(order.price * 100);
+  const adopted = !order.stripe_payment_intent_id;
   if (
     intent.amount_received !== expectedAmount ||
-    (intent.metadata?.order_id && intent.metadata.order_id !== order.id)
+    (intent.metadata?.order_id && intent.metadata.order_id !== order.id) ||
+    (adopted && intent.metadata?.order_id !== order.id)
   ) {
     console.error(
       `[checkout] order ${order.id}: payment ${intent.id} received ` +
@@ -351,7 +375,11 @@ export async function finalizeOrder(
   // and can be reset to `fulfillment_failed` to retry.
   const { data: claimed, error: claimError } = await supabaseAdmin()
     .from("canvas_orders")
-    .update({ status: "paid", paid_at: new Date().toISOString() })
+    .update({
+      status: "paid",
+      paid_at: new Date().toISOString(),
+      ...(adopted ? { stripe_payment_intent_id: intent.id } : {}),
+    })
     .eq("id", order.id)
     .in("status", ["pending_payment", "fulfillment_failed"])
     .select(ORDER_COLUMNS);
@@ -382,13 +410,29 @@ export async function finalizeOrder(
       null,
     );
 
-    const printful = await createPrintfulOrder({
-      externalId: order.id,
-      recipient,
-      size: order.size as CanvasSize,
-      product: productOf(order),
-      imageUrl,
-    });
+    // Printful's external_id is unique per store. If an earlier attempt got
+    // through (a timeout after Printful accepted it, a crash before we saved
+    // the id), adopt that order instead of failing on a duplicate forever.
+    const existing = await getPrintfulOrder(order.id);
+    if (existing && (existing.status === "failed" || existing.status === "canceled")) {
+      throw new HttpError(
+        409,
+        `Printful already has a ${existing.status} order for this — fix or ` +
+          `resubmit it in the Printful dashboard.`,
+      );
+    }
+    if (existing) {
+      console.log(`[checkout] order ${order.id}: adopting existing Printful order #${existing.id}`);
+    }
+    const printful =
+      existing ??
+      (await createPrintfulOrder({
+        externalId: order.id,
+        recipient,
+        size: order.size as CanvasSize,
+        product: productOf(order),
+        imageUrl,
+      }));
 
     const { data: updated } = await supabaseAdmin()
       .from("canvas_orders")

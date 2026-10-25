@@ -163,9 +163,12 @@ export async function createPrintfulOrder(
   };
 }
 
-/** The parts of a Printful order the status webhook needs. */
+/** The parts of a Printful order the status webhook and retries need. */
 export interface PrintfulOrderStatus {
+  id: number;
   status: string;
+  /** What Printful will bill for it, when it has priced it. */
+  cost: number | null;
   shipments: {
     carrier?: string;
     tracking_number?: string;
@@ -178,7 +181,7 @@ export interface PrintfulOrderStatus {
  * Read an order's live status from Printful by our external_id (the
  * canvas_orders id). Returns null when Printful has no such order. Used by the
  * webhook to confirm an event against the source of truth instead of trusting
- * the payload.
+ * the payload, and by fulfilment retries to avoid duplicate orders.
  */
 export async function getPrintfulOrder(
   externalId: string,
@@ -189,8 +192,11 @@ export async function getPrintfulOrder(
   );
   if (res.status === 404) return null;
   const result = await printfulJson(res);
+  const cost = Number(result?.costs?.total);
   return {
+    id: Number(result?.id),
     status: String(result?.status ?? ""),
+    cost: Number.isFinite(cost) && cost > 0 ? cost : null,
     shipments: Array.isArray(result?.shipments) ? result.shipments : [],
   };
 }

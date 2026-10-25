@@ -1,6 +1,8 @@
 /**
  * Helpers for streaming artwork images through the download API.
  */
+import { HttpError } from "./httpError.js";
+import { assertPublicUrl } from "./outboundUrl.js";
 
 const BROWSER_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -154,9 +156,31 @@ export async function fetchImageBytes(
   return { buffer, contentType };
 }
 
+/** Redirect hops followed before giving up (Wikimedia FilePath uses one). */
+const MAX_REDIRECTS = 5;
+
+/**
+ * Upstream types that can be streamed as an image. Some S3 buckets serve
+ * real JPEGs as octet-stream; anything else (HTML error pages, metadata
+ * service text) is refused rather than handed to the client as a download.
+ */
+function isImageType(type: string): boolean {
+  const t = type.split(";")[0].trim().toLowerCase();
+  return (
+    t.startsWith("image/") ||
+    t === "application/octet-stream" ||
+    t === "binary/octet-stream"
+  );
+}
+
 /**
  * Open an upstream image response for streaming through to the client.
  * Does not buffer the body — callers should pipe `response.body`.
+ *
+ * Every hop must resolve to a public address (utils/outboundUrl.ts), so a
+ * database URL can't make this process fetch internal endpoints. Pass this
+ * backend's own public URL as `trustedOrigin` when the image may be served by
+ * our IIIF proxy.
  *
  * `timeoutMs` only covers time-to-first-byte (headers). Once streaming starts,
  * large masters can take longer without being aborted.
@@ -164,30 +188,49 @@ export async function fetchImageBytes(
 export async function openImageResponse(
   imageUrl: string,
   timeoutMs = 90_000,
+  trustedOrigin?: string,
 ): Promise<{ response: Response; contentType: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(imageUrl, {
-      headers: {
-        ...BROWSER_HEADERS,
-        Referer: safeOrigin(imageUrl),
-      },
-      signal: controller.signal,
-    });
+    let url = imageUrl;
+    let res: Response | null = null;
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      await assertPublicUrl(url, trustedOrigin);
+      res = await fetch(url, {
+        headers: {
+          ...BROWSER_HEADERS,
+          Referer: safeOrigin(url),
+        },
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      const location = res.headers.get("location");
+      if (res.status >= 300 && res.status < 400 && location) {
+        url = new URL(location, url).toString();
+        res = null;
+        continue;
+      }
+      break;
+    }
 
+    if (!res) {
+      throw new Error("Image fetch failed: too many redirects");
+    }
     if (!res.ok) {
       throw new Error(`Image fetch failed: HTTP ${res.status}`);
     }
     if (!res.body) {
       throw new Error("Image fetch returned no body");
     }
+    const contentType = res.headers.get("content-type") ?? "image/jpeg";
+    if (!isImageType(contentType)) {
+      void res.body.cancel().catch(() => {});
+      throw new HttpError(502, `Image fetch returned ${contentType}, not an image`);
+    }
 
-    return {
-      response: res,
-      contentType: res.headers.get("content-type") ?? "image/jpeg",
-    };
+    return { response: res, contentType };
   } finally {
     clearTimeout(timer);
   }

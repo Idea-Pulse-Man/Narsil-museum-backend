@@ -16,6 +16,7 @@ import { Router } from "express";
 import { authedUser, requireUserFor } from "../middleware/auth.js";
 import {
   appleConfigured,
+  isVerificationError,
   resolveEntitlement,
   verifyNotification,
   verifyTransaction,
@@ -55,12 +56,24 @@ export function appleRoutes(): Router {
       }
 
       const user = authedUser(req);
-      const { originalTransactionId } =
-        await verifyTransaction(signedTransaction);
+      let verified: Awaited<ReturnType<typeof verifyTransaction>>;
+      try {
+        verified = await verifyTransaction(signedTransaction);
+      } catch (err) {
+        if (!isVerificationError(err)) throw err;
+        res.status(400).json({
+          error: "Bad Request",
+          message: "This purchase couldn't be verified with the App Store.",
+        });
+        return;
+      }
 
       // The signed transaction proves a purchase happened; Apple's status API
       // says whether it is still live. Always write the latter.
-      const snapshot = await resolveEntitlement(originalTransactionId);
+      const snapshot = await resolveEntitlement(
+        verified.originalTransactionId,
+        verified.environment,
+      );
       if (!snapshot) {
         res.status(409).json({
           error: "Conflict",
@@ -104,7 +117,8 @@ export function appleRoutes(): Router {
 
     try {
       const notification = await verifyNotification(signedPayload);
-      const { notificationType, subtype, originalTransactionId } = notification;
+      const { notificationType, subtype, originalTransactionId, environment } =
+        notification;
 
       if (!originalTransactionId) {
         // Notifications that carry no transaction (e.g. TEST) — acknowledge.
@@ -115,7 +129,7 @@ export function appleRoutes(): Router {
 
       // Re-read the authoritative status rather than hand-mapping each of
       // Apple's ~15 notification types onto a status and getting one wrong.
-      const snapshot = await resolveEntitlement(originalTransactionId);
+      const snapshot = await resolveEntitlement(originalTransactionId, environment);
       if (!snapshot) {
         console.warn(
           `[apple] ${notificationType}: Apple returned no status for ` +
@@ -153,6 +167,12 @@ export function appleRoutes(): Router {
       res.status(200).json({ received: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
+      if (isVerificationError(err)) {
+        // Not a genuine Apple payload for this app — retrying won't fix it.
+        console.warn(`[apple] notification rejected: ${message}`);
+        res.status(400).json({ error: "Bad Request" });
+        return;
+      }
       console.error(`[apple] notification failed: ${message}`);
       // 500 so Apple redelivers — a dropped REFUND or EXPIRED would otherwise
       // leave someone entitled forever.
