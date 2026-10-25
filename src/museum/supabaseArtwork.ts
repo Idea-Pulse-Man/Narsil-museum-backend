@@ -105,7 +105,19 @@ function mapRow(row: ArtworkRow): Artwork {
   };
 }
 
-/** Fetch one artwork by id from Supabase, or null when unavailable / not found. */
+/**
+ * Rows the public may see. Pending and rejected member uploads are always
+ * hidden (supabase/artwork-approval.sql), as are admin takedowns. The backend
+ * reads with the service role, which bypasses RLS, so every public read must
+ * apply this itself — otherwise a hidden row is still downloadable, sellable
+ * and fetched server-side.
+ */
+const VISIBLE = "hidden.is.null,hidden.eq.false";
+
+/**
+ * Fetch one visible artwork by id from Supabase, or null when unavailable,
+ * not found, or hidden.
+ */
 export async function getArtworkFromSupabase(id: string): Promise<Artwork | null> {
   const db = getClient();
   if (!db) return null;
@@ -114,13 +126,14 @@ export async function getArtworkFromSupabase(id: string): Promise<Artwork | null
     .from("artworks")
     .select(ARTWORK_COLUMNS)
     .eq("id", id)
+    .or(VISIBLE)
     .maybeSingle();
 
   if (error || !data?.image_url) return null;
   return mapRow(data as ArtworkRow);
 }
 
-/** Every ingested artwork, across all `MUSEUM_SOURCES` — the live catalog's artwork list. */
+/** Every visible artwork, across all `MUSEUM_SOURCES` — the live catalog's artwork list. */
 export async function listArtworksFromSupabase(): Promise<Artwork[]> {
   const db = getClient();
   if (!db) {
@@ -134,6 +147,7 @@ export async function listArtworksFromSupabase(): Promise<Artwork[]> {
       .from("artworks")
       .select(ARTWORK_COLUMNS)
       .not("image_url", "is", null)
+      .or(VISIBLE)
       .order("id", { ascending: true })
       .range(from, to),
   );

@@ -35,6 +35,23 @@ function cleanProps(raw: unknown): Props {
   return out;
 }
 
+/** A batch is sent within ~15 s; anything further out is a bad device clock. */
+const MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The client's event time, or now when it's unparseable or implausible. An
+ * invalid string would fail the whole insert; a far-future one would dodge
+ * the retention purge.
+ */
+function eventTime(raw: unknown): string {
+  const now = Date.now();
+  const at = typeof raw === "string" ? Date.parse(raw) : NaN;
+  if (!Number.isFinite(at) || Math.abs(at - now) > MAX_CLOCK_SKEW_MS) {
+    return new Date(now).toISOString();
+  }
+  return new Date(at).toISOString();
+}
+
 /** Validate an untrusted batch from the app. Null when it isn't one. */
 export function parseBatch(body: unknown): TelemetryBatch | null {
   if (!body || typeof body !== "object") return null;
@@ -51,7 +68,7 @@ export function parseBatch(body: unknown): TelemetryBatch | null {
       kind: i.kind === "error" ? ("error" as const) : ("event" as const),
       name: String(i.name).slice(0, 300),
       props: i.kind === "error" ? (i.props as Props | undefined) : cleanProps(i.props),
-      at: clip(i.at, 40) ?? new Date().toISOString(),
+      at: eventTime(i.at),
     }));
   return {
     installId,

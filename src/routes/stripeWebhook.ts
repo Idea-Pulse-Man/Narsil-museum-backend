@@ -43,7 +43,7 @@ export function stripeWebhookHandler(catalog: CatalogService): RequestHandler {
       const orderId = intent.metadata?.order_id;
       if (orderId) {
         try {
-          await finalizeOrder(catalog, orderId);
+          await finalizeOrder(catalog, orderId, undefined, intent.id);
         } catch (err) {
           // Acknowledge anyway: the failure is recorded on the order
           // (fulfillment_failed) and the app's finalize call retries it —
